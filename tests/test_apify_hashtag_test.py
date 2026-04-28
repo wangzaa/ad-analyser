@@ -136,3 +136,55 @@ def test_flatten_posts_handles_missing_fields():
     assert r["caption"] == ""
     assert r["likes_count"] == 0
     assert r["owner_username"] == ""
+
+
+def test_flatten_comments_attributes_post_and_hashtag():
+    scrape_results = [
+        {
+            "tag": "手遊",
+            "segment": "gamer_tech",
+            "posts": [
+                {"id": "p1", "url": "https://ig/p/abc", "ownerUsername": "userA"},
+            ],
+            "top_post_ids": {"p1"},
+            "comments_by_post": {
+                "p1": [
+                    {
+                        "id": "c1", "ownerUsername": "fanA",
+                        "text": "好正", "likesCount": 3,
+                        "timestamp": "2026-04-28T12:00:00Z",
+                    },
+                    {
+                        "id": "c2", "ownerUsername": "fanB",
+                        "text": "really?", "likesCount": 0,
+                        "timestamp": "2026-04-28T12:30:00Z",
+                    },
+                ]
+            },
+            "errors": [],
+        }
+    ]
+    rows = M.flatten_comments(scrape_results)
+    assert len(rows) == 2
+    c1 = next(r for r in rows if r["comment_id"] == "c1")
+    assert c1["hashtag"] == "手遊"
+    assert c1["segment"] == "gamer_tech"
+    assert c1["post_id"] == "p1"
+    assert c1["post_url"] == "https://ig/p/abc"
+    assert c1["post_owner_username"] == "userA"
+    assert c1["comment_owner_username"] == "fanA"
+    assert c1["text"] == "好正"
+    assert c1["likes_count"] == 3
+
+
+def test_flatten_comments_skips_posts_without_comments():
+    scrape_results = [
+        {
+            "tag": "x", "segment": "y",
+            "posts": [{"id": "p1", "url": "u", "ownerUsername": "o"}],
+            "top_post_ids": {"p1"},
+            "comments_by_post": {},
+            "errors": [],
+        }
+    ]
+    assert M.flatten_comments(scrape_results) == []

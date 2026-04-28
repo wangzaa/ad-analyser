@@ -107,6 +107,29 @@ def flatten_posts(scrape_results):
     return rows
 
 
+def flatten_comments(scrape_results):
+    """Walk comments_by_post for every hashtag, emit comments.csv rows."""
+    rows = []
+    for hr in scrape_results:
+        post_lookup = {p.get("id"): p for p in hr.get("posts", [])}
+        for post_id, comments in hr.get("comments_by_post", {}).items():
+            post = post_lookup.get(post_id, {})
+            for c in comments:
+                rows.append({
+                    "hashtag": hr["tag"],
+                    "segment": hr["segment"],
+                    "post_id": post_id,
+                    "post_url": post.get("url", ""),
+                    "post_owner_username": post.get("ownerUsername", ""),
+                    "comment_id": c.get("id", ""),
+                    "comment_owner_username": c.get("ownerUsername", ""),
+                    "text": c.get("text", "") or "",
+                    "likes_count": c.get("likesCount", 0) or 0,
+                    "timestamp": c.get("timestamp", ""),
+                })
+    return rows
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
