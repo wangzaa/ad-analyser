@@ -223,6 +223,43 @@ def write_manifest(path, run_meta, scrape_results, posts_rows):
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 
+def call_actor(actor_id, input_data, label, raw_dir, token):
+    """Run an Apify actor synchronously, save raw JSON, return items.
+
+    Returns (items, error). On success, items is a list and error is None.
+    On failure, items is None and error is a short string.
+    """
+    url = (
+        f"{API_BASE}/acts/{actor_id.replace('/', '~')}"
+        f"/run-sync-get-dataset-items?token={token}"
+    )
+    req = Request(
+        url,
+        data=json.dumps(input_data).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    t0 = time.time()
+    try:
+        with urlopen(req, timeout=300) as r:
+            items = json.loads(r.read())
+    except HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:200]
+        return None, f"HTTP {e.code}: {body}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+    elapsed = time.time() - t0
+    safe = label.replace("/", "_").replace(" ", "_")
+    raw_path = Path(raw_dir) / f"{safe}.json"
+    raw_path.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"  ✓ {label}: {len(items)} items in {elapsed:.1f}s")
+    return items, None
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
