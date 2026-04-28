@@ -244,3 +244,56 @@ def test_write_csv_handles_empty_rows(tmp_path):
     M.write_csv(str(path), [], ["a", "b"])
     text = path.read_text(encoding="utf-8-sig")
     assert text.strip() == "a,b"
+
+
+def test_write_manifest_serialises_run_metadata(tmp_path):
+    path = tmp_path / "manifest.json"
+    run_meta = {
+        "run_id": "2026-04-28T22-45-00_test",
+        "started_at": "2026-04-28T22:45:00Z",
+        "completed_at": "2026-04-28T22:49:00Z",
+        "duration_seconds": 240,
+        "config": {"run_label": "test", "hashtags": []},
+        "estimated_cost_usd": 1.18,
+    }
+    scrape_results = [
+        {
+            "tag": "手遊", "segment": "gamer_tech",
+            "posts": [{"id": "p1"}, {"id": "p2"}],
+            "comments_by_post": {"p1": [{"id": "c1"}, {"id": "c2"}]},
+            "top_post_ids": {"p1"},
+            "errors": [],
+        }
+    ]
+    posts_rows = [
+        {"owner_username": "userA"},
+        {"owner_username": "userA"},
+    ]
+    M.write_manifest(str(path), run_meta, scrape_results, posts_rows)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["run_id"] == "2026-04-28T22-45-00_test"
+    assert data["estimated_cost_usd"] == 1.18
+    assert len(data["per_hashtag"]) == 1
+    h = data["per_hashtag"][0]
+    assert h["tag"] == "手遊"
+    assert h["posts_returned"] == 2
+    assert h["comments_returned"] == 2
+    assert h["comments_drilled_on_posts"] == 1
+    assert h["error"] is None
+    assert data["totals"]["posts"] == 2
+    assert data["totals"]["comments"] == 2
+    assert data["totals"]["unique_creators"] == 1
+
+
+def test_write_manifest_records_hashtag_errors(tmp_path):
+    path = tmp_path / "manifest.json"
+    scrape_results = [
+        {"tag": "x", "segment": "y", "posts": [],
+         "comments_by_post": {}, "top_post_ids": set(),
+         "errors": ["HTTP 429: rate limited"]},
+    ]
+    M.write_manifest(str(path), {"run_id": "r", "config": {}}, scrape_results, [])
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["per_hashtag"][0]["error"] == "HTTP 429: rate limited"
+    assert data["errors"] == ["x: HTTP 429: rate limited"]

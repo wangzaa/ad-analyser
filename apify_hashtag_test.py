@@ -181,6 +181,48 @@ def write_csv(path, rows, columns):
             writer.writerow({k: row.get(k, "") for k in columns})
 
 
+def write_manifest(path, run_meta, scrape_results, posts_rows):
+    """Write manifest.json combining run_meta with per-hashtag stats."""
+    per_hashtag = []
+    errors = []
+    total_posts = 0
+    total_comments = 0
+    for hr in scrape_results:
+        n_posts = len(hr.get("posts", []))
+        cmts = hr.get("comments_by_post", {})
+        n_comments = sum(len(v) for v in cmts.values())
+        n_drilled = len(cmts)
+        first_error = hr.get("errors")[0] if hr.get("errors") else None
+        per_hashtag.append({
+            "tag": hr["tag"],
+            "segment": hr["segment"],
+            "posts_returned": n_posts,
+            "comments_drilled_on_posts": n_drilled,
+            "comments_returned": n_comments,
+            "error": first_error,
+        })
+        if first_error:
+            errors.append(f"{hr['tag']}: {first_error}")
+        total_posts += n_posts
+        total_comments += n_comments
+
+    unique_creators = len({r.get("owner_username") for r in posts_rows
+                           if r.get("owner_username")})
+
+    manifest = {
+        **run_meta,
+        "per_hashtag": per_hashtag,
+        "totals": {
+            "posts": total_posts,
+            "comments": total_comments,
+            "unique_creators": unique_creators,
+        },
+        "errors": errors,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
