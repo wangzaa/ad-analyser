@@ -1,5 +1,7 @@
 """Unit tests for apify_hashtag_test pure functions."""
 import os
+import shutil
+from pathlib import Path
 import apify_hashtag_test as M
 
 
@@ -297,3 +299,35 @@ def test_write_manifest_records_hashtag_errors(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["per_hashtag"][0]["error"] == "HTTP 429: rate limited"
     assert data["errors"] == ["x: HTTP 429: rate limited"]
+
+
+def test_reflatten_from_raw_produces_expected_csvs(tmp_path):
+    src = Path(__file__).parent / "fixtures" / "sample_run"
+    dst = tmp_path / "run"
+    shutil.copytree(src, dst)
+
+    M.reflatten_from_raw(str(dst))
+
+    posts_csv = (dst / "posts.csv").read_text(encoding="utf-8-sig")
+    assert "gamer_hk" in posts_csv
+    assert "casual_player" in posts_csv
+    assert "手遊" in posts_csv
+    assert "gamer_tech" in posts_csv
+    lines = posts_csv.splitlines()
+    post1_line = next(l for l in lines if "post1" in l)
+    assert post1_line.endswith("True") or post1_line.endswith("True\r")
+
+    comments_csv = (dst / "comments.csv").read_text(encoding="utf-8-sig")
+    assert "邊間電訊商呀？" in comments_csv
+    assert "fan1" in comments_csv
+    assert "fan2" in comments_csv
+
+    kols_csv = (dst / "kol_candidates.csv").read_text(encoding="utf-8-sig")
+    kols_lines = kols_csv.splitlines()
+    assert kols_lines[1].startswith("gamer_hk,")
+    assert kols_lines[2].startswith("casual_player,")
+
+    manifest = json.loads((dst / "manifest.json").read_text())
+    assert manifest["totals"]["posts"] == 2
+    assert manifest["totals"]["comments"] == 2
+    assert manifest["totals"]["unique_creators"] == 2

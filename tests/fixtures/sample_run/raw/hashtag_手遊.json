@@ -1,0 +1,16 @@
+[
+  {
+    "id": "post1", "shortCode": "abc123", "url": "https://instagram.com/p/abc123",
+    "ownerUsername": "gamer_hk", "ownerFullName": "Gamer HK",
+    "caption": "新5G plan 真係快好多 #手遊 #香港5g",
+    "likesCount": 250, "commentsCount": 18,
+    "timestamp": "2026-04-25T10:00:00Z"
+  },
+  {
+    "id": "post2", "shortCode": "def456", "url": "https://instagram.com/p/def456",
+    "ownerUsername": "casual_player", "ownerFullName": "",
+    "caption": "Genshin lag again",
+    "likesCount": 12, "commentsCount": 1,
+    "timestamp": "2026-04-26T14:00:00Z"
+  }
+]
