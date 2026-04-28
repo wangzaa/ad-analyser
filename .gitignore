@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 *.log
 rednote.har
+apify_output/
+apify_test_output/
