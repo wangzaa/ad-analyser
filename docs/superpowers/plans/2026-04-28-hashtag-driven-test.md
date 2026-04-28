@@ -34,14 +34,21 @@
 - Rename: `apify_test.py` → `apify_brand_probe.py`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Verify clean working tree for the rename**
+- [ ] **Step 1: Check `apify_test.py` git state**
 
 Run: `git status apify_test.py`
-Expected: shows `apify_test.py` is tracked (modified or unmodified). If untracked, abort and ask the user.
+Expected: shows the file as either tracked (modified/unmodified) OR untracked (`??`). The repo state has it untracked.
 
-- [ ] **Step 2: Rename the file via git**
+- [ ] **Step 2: Rename the file**
 
-Run: `git mv apify_test.py apify_brand_probe.py`
+If the file is untracked, use plain `mv`:
+
+```bash
+mv apify_test.py apify_brand_probe.py
+```
+
+If tracked, use `git mv apify_test.py apify_brand_probe.py` instead.
+
 Expected: no output on success.
 
 - [ ] **Step 3: Update the docstring in the renamed file**
