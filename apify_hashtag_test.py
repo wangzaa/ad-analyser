@@ -223,40 +223,79 @@ def write_manifest(path, run_meta, scrape_results, posts_rows):
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 
+POLL_INTERVAL_SEC = 5
+ACTOR_MAX_WAIT_SEC = 1200  # 20 min — IG hashtag scraper can be slow
+PROGRESS_EVERY_SEC = 30
+
+
 def call_actor(actor_id, input_data, label, raw_dir, token):
-    """Run an Apify actor synchronously, save raw JSON, return items.
+    """Run an Apify actor asynchronously, save raw JSON, return items.
+
+    Uses async pattern (POST run → poll status → GET dataset items) because
+    Apify's run-sync-get-dataset-items endpoint caps at 300s and IG actors
+    routinely exceed that.
 
     Returns (items, error). On success, items is a list and error is None.
     On failure, items is None and error is a short string.
     """
-    url = (
-        f"{API_BASE}/acts/{actor_id.replace('/', '~')}"
-        f"/run-sync-get-dataset-items?token={token}"
-    )
+    t0 = time.time()
+
+    start_url = f"{API_BASE}/acts/{actor_id.replace('/', '~')}/runs?token={token}"
     req = Request(
-        url,
+        start_url,
         data=json.dumps(input_data).encode(),
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    t0 = time.time()
     try:
-        with urlopen(req, timeout=600) as r:
+        with urlopen(req, timeout=60) as r:
+            run_data = json.loads(r.read())["data"]
+    except HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:200]
+        return None, f"HTTP {e.code} starting run: {body}"
+    except Exception as e:
+        return None, f"{type(e).__name__} starting run: {e}"
+
+    run_id = run_data["id"]
+    dataset_id = run_data["defaultDatasetId"]
+    status_url = f"{API_BASE}/actor-runs/{run_id}?token={token}"
+    last_progress = t0
+
+    while True:
+        elapsed = time.time() - t0
+        if elapsed > ACTOR_MAX_WAIT_SEC:
+            return None, f"actor wait exceeded {ACTOR_MAX_WAIT_SEC}s (run {run_id})"
+        time.sleep(POLL_INTERVAL_SEC)
+        try:
+            with urlopen(status_url, timeout=30) as r:
+                status = json.loads(r.read())["data"].get("status")
+        except Exception:
+            continue  # transient; keep polling until ACTOR_MAX_WAIT_SEC
+        if status == "SUCCEEDED":
+            break
+        if status in ("FAILED", "ABORTED", "TIMED-OUT"):
+            return None, f"actor {status} (run {run_id})"
+        if time.time() - last_progress >= PROGRESS_EVERY_SEC:
+            print(f"    {label}: {status} after {elapsed:.0f}s")
+            last_progress = time.time()
+
+    items_url = f"{API_BASE}/datasets/{dataset_id}/items?token={token}&format=json"
+    try:
+        with urlopen(items_url, timeout=120) as r:
             items = json.loads(r.read())
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:200]
-        return None, f"HTTP {e.code}: {body}"
+        return None, f"HTTP {e.code} fetching items: {body}"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__} fetching items: {e}"
 
-    elapsed = time.time() - t0
     safe = label.replace("/", "_").replace(" ", "_")
     raw_path = Path(raw_dir) / f"{safe}.json"
     raw_path.write_text(
         json.dumps(items, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"  ✓ {label}: {len(items)} items in {elapsed:.1f}s")
+    print(f"  ✓ {label}: {len(items)} items in {time.time() - t0:.1f}s")
     return items, None
 
 
