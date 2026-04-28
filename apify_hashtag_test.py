@@ -260,6 +260,65 @@ def call_actor(actor_id, input_data, label, raw_dir, token):
     return items, None
 
 
+def scrape_hashtag(tag, segment, cfg, raw_dir, token):
+    """Pull posts + drilled comments for one hashtag.
+
+    Returns dict matching the shape consumed by flatten_*.
+    """
+    print(f"\n→ #{tag} ({segment})")
+    result = {
+        "tag": tag,
+        "segment": segment,
+        "posts": [],
+        "comments_by_post": {},
+        "top_post_ids": set(),
+        "errors": [],
+    }
+
+    posts, err = call_actor(
+        HASHTAG_ACTOR,
+        {"hashtags": [tag], "resultsLimit": cfg["results_per_hashtag"]},
+        f"hashtag_{tag}",
+        raw_dir,
+        token,
+    )
+    if err:
+        result["errors"].append(err)
+        return result
+    result["posts"] = posts or []
+
+    if not result["posts"]:
+        return result
+
+    def engagement(p):
+        return (p.get("likesCount") or 0) + (p.get("commentsCount") or 0)
+
+    top_posts = sorted(result["posts"], key=engagement, reverse=True)[
+        : cfg["top_n_posts_for_comments"]
+    ]
+    result["top_post_ids"] = {p.get("id") for p in top_posts if p.get("id")}
+
+    for p in top_posts:
+        post_url = p.get("url")
+        post_id = p.get("id")
+        if not post_url or not post_id:
+            continue
+        comments, c_err = call_actor(
+            COMMENT_ACTOR,
+            {"directUrls": [post_url],
+             "resultsLimit": cfg["comments_per_top_post"]},
+            f"comments_{p.get('shortCode', post_id)}",
+            raw_dir,
+            token,
+        )
+        if c_err:
+            result["errors"].append(f"comments({post_id}): {c_err}")
+            continue
+        result["comments_by_post"][post_id] = comments or []
+
+    return result
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
