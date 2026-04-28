@@ -340,3 +340,157 @@ def load_dotenv_if_present(path=".env"):
         value = value.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+def confirm_cost(estimated, cap, force):
+    """Prompt the user (unless --force) before scraping."""
+    if estimated > cap and not force:
+        print(f"\n✗ Estimated cost ${estimated:.2f} exceeds cap ${cap:.2f}.")
+        print("  Re-run with --force to override, or lower the cap in config.")
+        sys.exit(1)
+    if force:
+        return
+    answer = input(f"\nProceed with scrape (~${estimated:.2f})? [y/N]: ").strip().lower()
+    if answer != "y":
+        print("Aborted.")
+        sys.exit(0)
+
+
+def make_output_dir(run_label):
+    """Create apify_output/<timestamp>_<run_label>/ + raw/ subdir, return path."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    run_id = f"{timestamp}_{run_label}"
+    out = Path("apify_output") / run_id
+    (out / "raw").mkdir(parents=True, exist_ok=True)
+    return out, run_id
+
+
+def reflatten_from_raw(run_dir):
+    """Re-flatten an existing run's raw/ JSON into CSVs + manifest in place."""
+    run_dir = Path(run_dir)
+    raw_dir = run_dir / "raw"
+    if not raw_dir.is_dir():
+        sys.exit(f"✗ {raw_dir} does not exist or is not a directory")
+
+    existing_manifest = run_dir / "manifest.json"
+    if not existing_manifest.is_file():
+        sys.exit(f"✗ {existing_manifest} not found — cannot reconstruct hashtag list")
+    cfg = json.loads(existing_manifest.read_text(encoding="utf-8"))["config"]
+
+    scrape_results = []
+    for h in cfg["hashtags"]:
+        tag = h["tag"]
+        posts_path = raw_dir / f"hashtag_{tag}.json"
+        posts = json.loads(posts_path.read_text(encoding="utf-8")) if posts_path.is_file() else []
+
+        def eng(p):
+            return (p.get("likesCount") or 0) + (p.get("commentsCount") or 0)
+        top_posts = sorted(posts, key=eng, reverse=True)[: cfg["top_n_posts_for_comments"]]
+        top_ids = {p.get("id") for p in top_posts if p.get("id")}
+
+        comments_by_post = {}
+        for p in top_posts:
+            shortcode = p.get("shortCode", p.get("id"))
+            cpath = raw_dir / f"comments_{shortcode}.json"
+            if cpath.is_file():
+                comments_by_post[p.get("id")] = json.loads(cpath.read_text(encoding="utf-8"))
+
+        scrape_results.append({
+            "tag": tag, "segment": h["segment"],
+            "posts": posts, "comments_by_post": comments_by_post,
+            "top_post_ids": top_ids, "errors": [],
+        })
+
+    posts_rows = flatten_posts(scrape_results)
+    comments_rows = flatten_comments(scrape_results)
+    kol_rows = aggregate_kols(posts_rows)
+
+    write_csv(run_dir / "posts.csv", posts_rows, POSTS_COLUMNS)
+    write_csv(run_dir / "comments.csv", comments_rows, COMMENTS_COLUMNS)
+    write_csv(run_dir / "kol_candidates.csv", kol_rows, KOLS_COLUMNS)
+
+    run_meta = {
+        "run_id": run_dir.name,
+        "config": cfg,
+        "estimated_cost_usd": 0.0,
+        "note": "re-flattened from raw/, no actor calls made",
+    }
+    write_manifest(run_dir / "manifest.json", run_meta, scrape_results, posts_rows)
+
+    print(f"\n✓ Re-flattened {len(scrape_results)} hashtags into {run_dir}")
+    print(f"  posts: {len(posts_rows)}  comments: {len(comments_rows)}  kols: {len(kol_rows)}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Apify IG hashtag-driven test")
+    parser.add_argument("--config", default="hashtags.json")
+    parser.add_argument("--force", action="store_true",
+                        help="skip cost confirmation prompt")
+    parser.add_argument("--from-raw", default=None,
+                        help="re-flatten an existing run dir without scraping")
+    args = parser.parse_args()
+
+    if args.from_raw:
+        reflatten_from_raw(args.from_raw)
+        return
+
+    load_dotenv_if_present()
+    token = os.environ.get("APIFY_TOKEN")
+    if not token:
+        sys.exit("APIFY_TOKEN not set. Add it to .env or export it. "
+                 "Get one at: https://console.apify.com/settings/integrations")
+
+    cfg = load_config(args.config)
+    estimated = estimate_cost(cfg)
+
+    n_tags = len(cfg["hashtags"])
+    expected_posts = n_tags * cfg["results_per_hashtag"]
+    expected_comments = (n_tags * cfg["top_n_posts_for_comments"]
+                         * cfg["comments_per_top_post"])
+    print("Run plan:")
+    print(f"  {n_tags} hashtags × {cfg['results_per_hashtag']} posts            = ~{expected_posts} posts")
+    print(f"  {n_tags} hashtags × {cfg['top_n_posts_for_comments']} posts × {cfg['comments_per_top_post']} cmts   = ~{expected_comments} comments")
+    print(f"  Estimated Apify cost              = ~${estimated:.2f} USD")
+    print(f"  Cost cap (from config)            = ${cfg['max_estimated_cost_usd']:.2f} USD")
+
+    confirm_cost(estimated, cfg["max_estimated_cost_usd"], args.force)
+
+    out_dir, run_id = make_output_dir(cfg["run_label"])
+    raw_dir = out_dir / "raw"
+    started_at = datetime.now(timezone.utc)
+
+    scrape_results = []
+    for h in cfg["hashtags"]:
+        scrape_results.append(
+            scrape_hashtag(h["tag"], h["segment"], cfg, raw_dir, token)
+        )
+
+    posts_rows = flatten_posts(scrape_results)
+    comments_rows = flatten_comments(scrape_results)
+    kol_rows = aggregate_kols(posts_rows)
+
+    write_csv(out_dir / "posts.csv", posts_rows, POSTS_COLUMNS)
+    write_csv(out_dir / "comments.csv", comments_rows, COMMENTS_COLUMNS)
+    write_csv(out_dir / "kol_candidates.csv", kol_rows, KOLS_COLUMNS)
+
+    completed_at = datetime.now(timezone.utc)
+    run_meta = {
+        "run_id": run_id,
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "duration_seconds": int((completed_at - started_at).total_seconds()),
+        "config": cfg,
+        "estimated_cost_usd": estimated,
+    }
+    write_manifest(out_dir / "manifest.json", run_meta, scrape_results, posts_rows)
+
+    n_failed = sum(1 for hr in scrape_results if hr["errors"])
+    print("\n" + "=" * 60)
+    print(f"DONE in {run_meta['duration_seconds']}s. Output: {out_dir}")
+    print(f"  Posts: {len(posts_rows)}  Comments: {len(comments_rows)}  KOLs: {len(kol_rows)}")
+    print(f"  Hashtags with errors: {n_failed}/{n_tags}")
+    print(f"  Check actual cost at: https://console.apify.com/billing")
+
+
+if __name__ == "__main__":
+    main()
