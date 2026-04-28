@@ -84,6 +84,29 @@ def estimate_cost(cfg):
     return posts * COST_PER_POST + comments * COST_PER_COMMENT
 
 
+def flatten_posts(scrape_results):
+    """Walk all hashtag results, emit posts.csv rows. Pure function."""
+    rows = []
+    for hr in scrape_results:
+        top_ids = hr.get("top_post_ids", set())
+        for p in hr.get("posts", []):
+            rows.append({
+                "hashtag": hr["tag"],
+                "segment": hr["segment"],
+                "post_id": p.get("id", ""),
+                "shortcode": p.get("shortCode", ""),
+                "url": p.get("url", ""),
+                "owner_username": p.get("ownerUsername", ""),
+                "owner_full_name": p.get("ownerFullName", ""),
+                "caption": p.get("caption", "") or "",
+                "likes_count": p.get("likesCount", 0) or 0,
+                "comments_count": p.get("commentsCount", 0) or 0,
+                "timestamp": p.get("timestamp", ""),
+                "is_top_engaged": p.get("id") in top_ids,
+            })
+    return rows
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
