@@ -47,6 +47,43 @@ KOLS_COLUMNS = [
 ]
 
 
+REQUIRED_CONFIG_FIELDS = (
+    "run_label",
+    "results_per_hashtag",
+    "top_n_posts_for_comments",
+    "comments_per_top_post",
+    "max_estimated_cost_usd",
+    "hashtags",
+)
+
+
+def load_config(path):
+    """Read and validate hashtags.json. Raises ValueError on missing fields."""
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    for field in REQUIRED_CONFIG_FIELDS:
+        if field not in cfg:
+            raise ValueError(f"config missing required field: {field}")
+    if not isinstance(cfg["hashtags"], list) or not cfg["hashtags"]:
+        raise ValueError("config.hashtags must be a non-empty list")
+    for i, h in enumerate(cfg["hashtags"]):
+        if "tag" not in h or "segment" not in h:
+            raise ValueError(f"config.hashtags[{i}] missing 'tag' or 'segment'")
+    return cfg
+
+
+def estimate_cost(cfg):
+    """Return estimated USD cost for one full run of cfg."""
+    n_tags = len(cfg["hashtags"])
+    posts = n_tags * cfg["results_per_hashtag"]
+    comments = (
+        n_tags
+        * cfg["top_n_posts_for_comments"]
+        * cfg["comments_per_top_post"]
+    )
+    return posts * COST_PER_POST + comments * COST_PER_COMMENT
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.

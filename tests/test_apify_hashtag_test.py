@@ -30,3 +30,55 @@ def test_load_dotenv_silent_when_missing_file(tmp_path, monkeypatch):
     monkeypatch.delenv("APIFY_TOKEN", raising=False)
     M.load_dotenv_if_present(str(tmp_path / "nonexistent.env"))
     assert os.environ.get("APIFY_TOKEN") is None
+
+
+import json
+import pytest
+
+
+def test_load_config_reads_valid_file(tmp_path):
+    cfg_path = tmp_path / "h.json"
+    cfg_path.write_text(json.dumps({
+        "run_label": "test",
+        "results_per_hashtag": 30,
+        "top_n_posts_for_comments": 5,
+        "comments_per_top_post": 10,
+        "max_estimated_cost_usd": 2.0,
+        "hashtags": [{"tag": "x", "segment": "y"}],
+    }))
+    cfg = M.load_config(str(cfg_path))
+    assert cfg["run_label"] == "test"
+    assert len(cfg["hashtags"]) == 1
+
+
+def test_load_config_rejects_missing_field(tmp_path):
+    cfg_path = tmp_path / "h.json"
+    cfg_path.write_text(json.dumps({"run_label": "test"}))  # missing fields
+    with pytest.raises(ValueError, match="missing required field"):
+        M.load_config(str(cfg_path))
+
+
+def test_estimate_cost_simple():
+    cfg = {
+        "results_per_hashtag": 10,
+        "top_n_posts_for_comments": 2,
+        "comments_per_top_post": 5,
+        "hashtags": [{"tag": "a", "segment": "x"}, {"tag": "b", "segment": "x"}],
+    }
+    # 2 hashtags × 10 posts × 0.001 = 0.020
+    # 2 hashtags × 2 posts × 5 comments × 0.0002 = 0.004
+    # total = 0.024
+    assert M.estimate_cost(cfg) == pytest.approx(0.024)
+
+
+def test_estimate_cost_full_28_hashtags():
+    cfg = {
+        "results_per_hashtag": 30,
+        "top_n_posts_for_comments": 5,
+        "comments_per_top_post": 10,
+        "hashtags": [{"tag": str(i), "segment": "x"} for i in range(28)],
+    }
+    # 28 × 30 × 0.001 = 0.84
+    # 28 × 5 × 10 × 0.0002 = 0.28
+    # total = 1.12
+    assert M.estimate_cost(cfg) == pytest.approx(1.12)
