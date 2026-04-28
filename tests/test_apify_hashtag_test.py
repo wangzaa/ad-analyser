@@ -188,3 +188,35 @@ def test_flatten_comments_skips_posts_without_comments():
         }
     ]
     assert M.flatten_comments(scrape_results) == []
+
+
+def test_aggregate_kols_ranks_by_total_engagement():
+    posts_rows = [
+        # userA: 2 posts, 100+50 likes, 10+5 comments → 165 total
+        {"hashtag": "手遊", "segment": "gamer_tech", "owner_username": "userA",
+         "url": "u/p1", "likes_count": 100, "comments_count": 10},
+        {"hashtag": "電競", "segment": "gamer_tech", "owner_username": "userA",
+         "url": "u/p2", "likes_count": 50, "comments_count": 5},
+        # userB: 1 post, 30 likes, 2 comments → 32 total
+        {"hashtag": "手遊", "segment": "gamer_tech", "owner_username": "userB",
+         "url": "u/p3", "likes_count": 30, "comments_count": 2},
+    ]
+    kols = M.aggregate_kols(posts_rows)
+    assert len(kols) == 2
+    assert kols[0]["username"] == "userA"
+    assert kols[0]["appearances"] == 2
+    assert kols[0]["total_likes"] == 150
+    assert kols[0]["total_comments"] == 15
+    assert set(kols[0]["hashtags"].split(";")) == {"手遊", "電競"}
+    assert kols[0]["segments"] == "gamer_tech"
+    assert kols[0]["top_post_url"] == "u/p1"
+    assert kols[1]["username"] == "userB"
+    assert kols[1]["appearances"] == 1
+
+
+def test_aggregate_kols_ignores_blank_username():
+    posts_rows = [
+        {"hashtag": "x", "segment": "y", "owner_username": "",
+         "url": "u", "likes_count": 1, "comments_count": 0},
+    ]
+    assert M.aggregate_kols(posts_rows) == []

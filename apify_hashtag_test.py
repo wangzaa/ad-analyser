@@ -130,6 +130,48 @@ def flatten_comments(scrape_results):
     return rows
 
 
+def aggregate_kols(posts_rows):
+    """Group posts by owner_username, return KOL rows ranked by engagement."""
+    by_user = {}
+    for r in posts_rows:
+        u = r.get("owner_username") or ""
+        if not u:
+            continue
+        entry = by_user.setdefault(u, {
+            "username": u,
+            "appearances": 0,
+            "hashtags": set(),
+            "segments": set(),
+            "total_likes": 0,
+            "total_comments": 0,
+            "top_post_url": "",
+            "_top_engagement": -1,
+        })
+        entry["appearances"] += 1
+        entry["hashtags"].add(r["hashtag"])
+        entry["segments"].add(r["segment"])
+        entry["total_likes"] += r["likes_count"]
+        entry["total_comments"] += r["comments_count"]
+        engagement = r["likes_count"] + r["comments_count"]
+        if engagement > entry["_top_engagement"]:
+            entry["_top_engagement"] = engagement
+            entry["top_post_url"] = r["url"]
+
+    rows = []
+    for entry in by_user.values():
+        rows.append({
+            "username": entry["username"],
+            "appearances": entry["appearances"],
+            "hashtags": ";".join(sorted(entry["hashtags"])),
+            "segments": ";".join(sorted(entry["segments"])),
+            "total_likes": entry["total_likes"],
+            "total_comments": entry["total_comments"],
+            "top_post_url": entry["top_post_url"],
+        })
+    rows.sort(key=lambda r: r["total_likes"] + r["total_comments"], reverse=True)
+    return rows
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
