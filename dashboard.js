@@ -289,7 +289,7 @@ function Donut({ data, width = 200, height = 200 }) {
 }
 
 // MAIN DASHBOARD
-export default function Dashboard() {
+function Dashboard() {
   const [tab, setTab] = useState('campaigns');
   const [fileName, setFileName] = useState(null);
   const [allData, setAllData] = useState([]);
