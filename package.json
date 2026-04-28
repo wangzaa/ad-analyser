@@ -1,0 +1,23 @@
+{
+  "name": "ad-analyser",
+  "version": "1.0.0",
+  "description": "HK Telco Ads Dashboard - Analyze Meta and TikTok advertising campaigns",
+  "homepage": "https://wangzaa.github.io/ad-analyser",
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "deploy": "git subtree push --prefix . origin gh-pages"
+  },
+  "keywords": [
+    "analytics",
+    "meta",
+    "tiktok",
+    "advertising",
+    "dashboard"
+  ],
+  "author": "Andrew",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wangzaa/ad-analyser.git"
+  }
+}
