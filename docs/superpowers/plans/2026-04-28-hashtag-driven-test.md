@@ -233,6 +233,29 @@ KOLS_COLUMNS = [
     "username", "appearances", "hashtags", "segments",
     "total_likes", "total_comments", "top_post_url",
 ]
+
+
+def load_dotenv_if_present(path=".env"):
+    """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
+    lines and set them. Stdlib only, no python-dotenv dependency.
+
+    Lines beginning with '#' or blank lines are ignored. Quoted values
+    have surrounding quotes stripped. Existing env vars are NOT overwritten.
+    """
+    if os.environ.get("APIFY_TOKEN"):
+        return
+    p = Path(path)
+    if not p.is_file():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 ```
 
 (More functions added in subsequent tasks. Leave the file at this point for now.)
@@ -243,6 +266,7 @@ Create `tests/test_apify_hashtag_test.py` with:
 
 ```python
 """Unit tests for apify_hashtag_test pure functions."""
+import os
 import apify_hashtag_test as M
 
 
@@ -250,12 +274,35 @@ def test_module_imports():
     assert M.COST_PER_POST == 0.001
     assert M.COST_PER_COMMENT == 0.0002
     assert M.HASHTAG_ACTOR == "apify/instagram-hashtag-scraper"
+
+
+def test_load_dotenv_sets_missing_var(tmp_path, monkeypatch):
+    monkeypatch.delenv("APIFY_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text('APIFY_TOKEN=xyz123\n# comment\nOTHER="quoted"\n')
+    M.load_dotenv_if_present(str(env_file))
+    assert os.environ["APIFY_TOKEN"] == "xyz123"
+    assert os.environ["OTHER"] == "quoted"
+
+
+def test_load_dotenv_does_not_overwrite_existing(tmp_path, monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", "already_set")
+    env_file = tmp_path / ".env"
+    env_file.write_text("APIFY_TOKEN=should_be_ignored\n")
+    M.load_dotenv_if_present(str(env_file))
+    assert os.environ["APIFY_TOKEN"] == "already_set"
+
+
+def test_load_dotenv_silent_when_missing_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("APIFY_TOKEN", raising=False)
+    M.load_dotenv_if_present(str(tmp_path / "nonexistent.env"))
+    assert os.environ.get("APIFY_TOKEN") is None
 ```
 
 - [ ] **Step 4: Run smoke test**
 
 Run: `pytest tests/test_apify_hashtag_test.py -v`
-Expected: 1 passed.
+Expected: 4 passed.
 
 If pytest reports `ModuleNotFoundError: pytest`, install with `pip3 install pytest` and re-run.
 
@@ -1175,10 +1222,11 @@ def main():
         reflatten_from_raw(args.from_raw)
         return
 
+    load_dotenv_if_present()
     token = os.environ.get("APIFY_TOKEN")
     if not token:
-        sys.exit("Set APIFY_TOKEN env var. Get one at: "
-                 "https://console.apify.com/settings/integrations")
+        sys.exit("APIFY_TOKEN not set. Add it to .env or export it. "
+                 "Get one at: https://console.apify.com/settings/integrations")
 
     cfg = load_config(args.config)
     estimated = estimate_cost(cfg)
