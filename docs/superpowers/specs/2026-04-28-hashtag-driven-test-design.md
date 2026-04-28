@@ -223,10 +223,15 @@ load_config(path) → dict
     Reads hashtags.json, validates required fields, returns config.
 
 estimate_cost(config) → float
-    expected_posts   = len(hashtags) × results_per_hashtag
+    expected_posts    = len(hashtags) × results_per_hashtag
     expected_comments = len(hashtags) × top_n_posts_for_comments × comments_per_top_post
-    cost = expected_posts × hashtag_unit_cost + expected_comments × comment_unit_cost
-    Aborts with prompt if > max_estimated_cost_usd (unless --force).
+    cost = expected_posts × COST_PER_POST + expected_comments × COST_PER_COMMENT
+    Constants live at top of script:
+      COST_PER_POST    = 0.001  (Apify hashtag scraper, USD)
+      COST_PER_COMMENT = 0.0002 (Apify comment scraper, USD)
+    These are estimates only; actual cost is read from console.apify.com/billing
+    after the run. Aborts with prompt if estimate > max_estimated_cost_usd
+    (unless --force).
 
 call_actor(actor_id, input_data, label) → list[dict] | None
     Uses run-sync-get-dataset-items, 300s timeout (same pattern as
@@ -299,7 +304,9 @@ python apify_hashtag_test.py                          # default: hashtags.json, 
 python apify_hashtag_test.py --config other.json      # custom config
 python apify_hashtag_test.py --force                  # skip cost prompt
 python apify_hashtag_test.py --from-raw apify_output/2026-04-28T22-45-00_segments_4_5_6_test
-                                                       # re-flatten existing raw JSON
+                                                       # re-flatten existing raw JSON;
+                                                       # no actor calls, no cost prompt;
+                                                       # overwrites CSVs + manifest in-place
 ```
 
 `APIFY_TOKEN` env var is required (matches existing brand probe).
