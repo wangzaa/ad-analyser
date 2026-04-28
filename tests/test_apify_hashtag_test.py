@@ -220,3 +220,27 @@ def test_aggregate_kols_ignores_blank_username():
          "url": "u", "likes_count": 1, "comments_count": 0},
     ]
     assert M.aggregate_kols(posts_rows) == []
+
+
+def test_write_csv_emits_bom_and_chinese_roundtrips(tmp_path):
+    path = tmp_path / "out.csv"
+    rows = [
+        {"col_a": "手遊", "col_b": 42},
+        {"col_a": "港大", "col_b": 7},
+    ]
+    M.write_csv(str(path), rows, ["col_a", "col_b"])
+
+    raw = path.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf"
+
+    text = raw.decode("utf-8-sig")
+    assert "手遊" in text
+    assert "港大" in text
+    assert text.splitlines()[0] == "col_a,col_b"
+
+
+def test_write_csv_handles_empty_rows(tmp_path):
+    path = tmp_path / "empty.csv"
+    M.write_csv(str(path), [], ["a", "b"])
+    text = path.read_text(encoding="utf-8-sig")
+    assert text.strip() == "a,b"

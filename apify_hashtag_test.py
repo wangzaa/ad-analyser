@@ -172,6 +172,15 @@ def aggregate_kols(posts_rows):
     return rows
 
 
+def write_csv(path, rows, columns):
+    """Write rows to path as utf-8-sig CSV (BOM so Excel reads Chinese)."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in columns})
+
+
 def load_dotenv_if_present(path=".env"):
     """If APIFY_TOKEN is not already in os.environ, parse path for KEY=value
     lines and set them. Stdlib only, no python-dotenv dependency.
