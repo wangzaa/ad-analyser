@@ -241,7 +241,7 @@ def call_actor(actor_id, input_data, label, raw_dir, token):
     )
     t0 = time.time()
     try:
-        with urlopen(req, timeout=300) as r:
+        with urlopen(req, timeout=600) as r:
             items = json.loads(r.read())
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:200]
