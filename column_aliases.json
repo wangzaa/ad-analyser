@@ -1,0 +1,29 @@
+{
+  "_comment": "Header aliases for Meta and Douyin CSV exports. Edit this file to add new column-name variants without touching dashboard.js. Matching is case-insensitive and ignores parens, percent signs, dashes, and extra whitespace.",
+  "meta": {
+    "Spend":        ["Amount Spent (HKD)", "Amount spent (HKD)", "Spend"],
+    "Impressions":  ["Impressions"],
+    "Clicks":       ["Link Clicks", "Link clicks", "Clicks (All)", "Unique Link Clicks", "Outbound Clicks", "Button Clicks", "Clicks"],
+    "CTR":          ["CTR (Link Click-Through Rate)", "CTR (link click) %", "CTR (link click)", "CTR (All)", "CTR"],
+    "CPA":          ["Cost Per Link Click (HKD)", "Cost per Result (HKD)", "Cost per result (HKD)", "CPC (Cost Per Click) (HKD)", "Cost Per Click (All) (HKD)", "CPC (HKD, link click)", "Cost per result", "CPC (HKD)"],
+    "Conversions":  ["Conversions", "Results"],
+    "Frequency":    ["Frequency"],
+    "Date":         ["Reporting starts", "Reporting ends", "Date", "Day"],
+    "CampaignName": ["Campaign Name", "Campaign name"],
+    "AdSetName":    ["Ad Set Name", "Ad set name"],
+    "AdName":       ["Ad Name", "Ad name"]
+  },
+  "douyin": {
+    "Spend":        ["Cost (HKD)", "Spend (HKD)", "Cost", "Spend"],
+    "Impressions":  ["Impressions"],
+    "Clicks":       ["Clicks", "Clicks (destination)", "Ad Interactions", "Click"],
+    "CTR":          ["CTR (%)", "CTR (destination) %", "CTR (destination)", "Click-Through Rate (%)", "CTR"],
+    "CPA":          ["Cost per Result (HKD)", "Cost Per Result (HKD)", "Cost per conversion (HKD)", "CPC (HKD)", "Cost Per Click (HKD)", "Cost per Result", "Cost Per Conversion"],
+    "Conversions":  ["Conversions", "Results", "Result"],
+    "Frequency":    ["Frequency"],
+    "Date":         ["By Day", "Date", "Day", "Reporting starts"],
+    "CampaignName": ["Campaign Name", "Campaign name"],
+    "AdSetName":    ["Ad Group Name", "Ad Set Name", "Ad group name"],
+    "AdName":       ["Ad Name", "Ad name"]
+  }
+}
