@@ -15,10 +15,31 @@ Analytics dashboard for analyzing Meta and TikTok advertising campaigns for Hong
 ### Local Development
 
 ```bash
-# Start a local server
+# Frontend — start a local server (serves frontend/)
 npm start
-
 # Then open http://localhost:8000 in your browser
+
+# ETL — install the Python package in editable mode
+pip install -e ".[dev]"
+
+# Run ETL via console scripts
+etl-csv-to-sql          # reads data/raw/crm_customers_v2.csv → sql/generated/
+build-bulk-inserts      # bulk INSERTs → sql/generated/
+```
+
+### Repository Layout
+
+```
+frontend/   # static dashboard (index.html, dashboard.js, JSX, column_aliases.json)
+etl/        # Python ETL package (csv → SQL transformers)
+sql/
+  generated/   # ETL output, regenerated from etl/
+  migrations/  # hand-written migrations
+data/
+  raw/        # untouched source CSVs (gitignored if large)
+  interim/    # mid-pipeline artifacts
+  processed/  # final outputs
+docs/       # plans + specs
 ```
 
 ### Data Format
@@ -45,8 +66,8 @@ git add .
 git commit -m "Initial commit"
 git push -u origin master
 
-# Create and deploy to gh-pages branch
-git subtree push --prefix . origin gh-pages
+# Create and deploy to gh-pages branch (only frontend/ is published)
+git subtree push --prefix frontend origin gh-pages
 ```
 
 Then configure GitHub Pages:

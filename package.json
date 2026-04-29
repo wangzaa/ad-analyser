@@ -4,8 +4,8 @@
   "description": "HK Telco Ads Dashboard - Analyze Meta and TikTok advertising campaigns",
   "homepage": "https://wangzaa.github.io/ad-analyser",
   "scripts": {
-    "start": "python3 -m http.server 8000",
-    "deploy": "git subtree push --prefix . origin gh-pages"
+    "start": "cd frontend && python3 -m http.server 8000",
+    "deploy": "git subtree push --prefix frontend origin gh-pages"
   },
   "keywords": [
     "analytics",

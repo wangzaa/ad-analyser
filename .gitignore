@@ -2,6 +2,10 @@ node_modules/
 .env
 .DS_Store
 *.log
-rednote.har
-apify_output/
-apify_test_output/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.claude/
+.vscode/

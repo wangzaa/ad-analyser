@@ -21,7 +21,7 @@ function parseCSV(text) {
 
 function detectPlatform(headers) {
   const h = headers.join(" ").toLowerCase();
-  if (h.includes("by day") && h.includes("video views at 25%")) return "tiktok";
+  if (h.includes("by day") && h.includes("video views at 25%")) return "douyin";
   if (h.includes("reporting starts") && h.includes("amount spent")) return "meta";
   if (h.includes("customer_id") && h.includes("projected_ltv")) return "crm";
   if (h.includes("age") && h.includes("gender") && h.includes("cost per result")) return "meta_demo";
@@ -53,13 +53,13 @@ function normaliseMeta(rows) {
   }));
 }
 
-function normaliseTikTok(rows) {
+function normaliseDouyin(rows) {
   return rows.map(r => ({
     date: r["By Day"],
     campaign: r["Campaign name"],
     adSet: r["Ad group name"],
     ad: r["Ad name"],
-    platform: "TikTok",
+    platform: "Douyin",
     spend: num(r["Cost (HKD)"]),
     impressions: num(r["Impressions"]),
     reach: num(r["Reach"]),
@@ -230,7 +230,7 @@ export default function Dashboard() {
   const [drillCampaign, setDrillCampaign] = useState(null);
   const [usingSample, setUsingSample] = useState(false);
 
-  const PLATFORM_COLORS = { Meta: "#3b82f6", TikTok: "#ec4899" };
+  const PLATFORM_COLORS = { Meta: "#3b82f6", Douyin: "#ec4899" };
 
   /* ── File handling ── */
   const handleCampaignFiles = useCallback(async (fileList) => {
@@ -250,9 +250,9 @@ export default function Dashboard() {
       if (platform === "meta") {
         newRows.push(...normaliseMeta(rows));
         newFiles.push({ name: f.name, platform: "Meta", rows: rows.length, color: "#3b82f6" });
-      } else if (platform === "tiktok") {
-        newRows.push(...normaliseTikTok(rows));
-        newFiles.push({ name: f.name, platform: "TikTok", rows: rows.length, color: "#ec4899" });
+      } else if (platform === "douyin") {
+        newRows.push(...normaliseDouyin(rows));
+        newFiles.push({ name: f.name, platform: "Douyin", rows: rows.length, color: "#ec4899" });
       }
     }
     setFiles(prev => [...prev, ...newFiles]);
@@ -273,7 +273,7 @@ export default function Dashboard() {
     try {
       const metaFam = await (await fetch("/api/files/mnt/user-data/outputs/meta_5g_family_plan.csv")).text().catch(() => null);
       const metaRoam = await (await fetch("/api/files/mnt/user-data/outputs/meta_roaming_pass.csv")).text().catch(() => null);
-      const ttGamer = await (await fetch("/api/files/mnt/user-data/outputs/tiktok_gamer_5g.csv")).text().catch(() => null);
+      const ttGamer = await (await fetch("/api/files/mnt/user-data/outputs/douyin_gamer_5g.csv")).text().catch(() => null);
       const metaDemo = await (await fetch("/api/files/mnt/user-data/outputs/meta_5g_family_plan_demographics.csv")).text().catch(() => null);
       const crm = await (await fetch("/api/files/mnt/user-data/outputs/crm_customers.csv")).text().catch(() => null);
 
@@ -282,7 +282,7 @@ export default function Dashboard() {
 
       if (metaFam) { const r = parseCSV(metaFam); allRows.push(...normaliseMeta(r)); allFiles.push({ name: "meta_5g_family_plan.csv", platform: "Meta", rows: r.length, color: "#3b82f6" }); }
       if (metaRoam) { const r = parseCSV(metaRoam); allRows.push(...normaliseMeta(r)); allFiles.push({ name: "meta_roaming_pass.csv", platform: "Meta", rows: r.length, color: "#3b82f6" }); }
-      if (ttGamer) { const r = parseCSV(ttGamer); allRows.push(...normaliseTikTok(r)); allFiles.push({ name: "tiktok_gamer_5g.csv", platform: "TikTok", rows: r.length, color: "#ec4899" }); }
+      if (ttGamer) { const r = parseCSV(ttGamer); allRows.push(...normaliseDouyin(r)); allFiles.push({ name: "douyin_gamer_5g.csv", platform: "Douyin", rows: r.length, color: "#ec4899" }); }
       if (metaDemo) { const r = parseCSV(metaDemo); setDemoData(r); allFiles.push({ name: "meta_demographics.csv", platform: "Meta Demographics", rows: r.length, color: "#8b5cf6" }); }
       if (crm) { const r = parseCSV(crm); setCrmData(r); setCrmFiles([{ name: "crm_customers.csv", rows: r.length, color: "#10b981" }]); }
 
@@ -306,8 +306,8 @@ export default function Dashboard() {
       { campaign: "HK_5G_FamilyPlan_Q4_2025", adSet: "FamilyPlan_Parents_30-45_HK", platform: "Meta", dailySpend: 800, ctr: 0.014, cvr: 0.030, cpm: 72 },
       { campaign: "HK_5G_FamilyPlan_Q4_2025", adSet: "FamilyPlan_Lookalike_5G_Customers", platform: "Meta", dailySpend: 1200, ctr: 0.011, cvr: 0.022, cpm: 85 },
       { campaign: "HK_5G_FamilyPlan_Q4_2025", adSet: "FamilyPlan_Broad_HK_25-55", platform: "Meta", dailySpend: 2200, ctr: 0.018, cvr: 0.008, cpm: 38 },
-      { campaign: "HK_5G_GamerUnlimited_Q4", adSet: "Gamers_M_18-25_HK_HighIntent", platform: "TikTok", dailySpend: 1500, ctr: 0.038, cvr: 0.042, cpm: 28 },
-      { campaign: "HK_5G_GamerUnlimited_Q4", adSet: "Gamers_LookalikeChurnedYouth", platform: "TikTok", dailySpend: 1200, ctr: 0.031, cvr: 0.035, cpm: 32 },
+      { campaign: "HK_5G_GamerUnlimited_Q4", adSet: "Gamers_M_18-25_HK_HighIntent", platform: "Douyin", dailySpend: 1500, ctr: 0.038, cvr: 0.042, cpm: 28 },
+      { campaign: "HK_5G_GamerUnlimited_Q4", adSet: "Gamers_LookalikeChurnedYouth", platform: "Douyin", dailySpend: 1200, ctr: 0.031, cvr: 0.035, cpm: 32 },
       { campaign: "HK_RoamingPass_Asia_Q4_2025", adSet: "Roaming_TravellersGoldenWeek_HK", platform: "Meta", dailySpend: 4200, ctr: 0.010, cvr: 0.012, cpm: 55 },
       { campaign: "HK_RoamingPass_Asia_Q4_2025", adSet: "Roaming_BizTravellers_HK_25-55", platform: "Meta", dailySpend: 2400, ctr: 0.008, cvr: 0.010, cpm: 58 },
     ];
@@ -370,7 +370,7 @@ export default function Dashboard() {
 
     setFiles([
       { name: "sample_meta.csv", platform: "Meta", rows: 14 * 5, color: "#3b82f6" },
-      { name: "sample_tiktok.csv", platform: "TikTok", rows: 14 * 2, color: "#ec4899" },
+      { name: "sample_douyin.csv", platform: "Douyin", rows: 14 * 2, color: "#ec4899" },
     ]);
     setNormalised(sampleNorm);
     setCrmData(crmSample);
@@ -497,8 +497,8 @@ export default function Dashboard() {
           <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {/* Drop zone / file chips */}
             {!hasData ? (
-              <DropZone onFiles={handleCampaignFiles} label="Drop Meta & TikTok CSV exports here">
-                <div style={{ fontSize: 14, color: "#ffffff50", marginBottom: 6 }}>📁 Drop Meta & TikTok CSV exports here</div>
+              <DropZone onFiles={handleCampaignFiles} label="Drop Meta & Douyin CSV exports here">
+                <div style={{ fontSize: 14, color: "#ffffff50", marginBottom: 6 }}>📁 Drop Meta & Douyin CSV exports here</div>
                 <div style={{ fontSize: 11, color: "#ffffff25", marginBottom: 12 }}>Auto-detects platform from headers · Multiple files OK</div>
                 <button onClick={e => { e.stopPropagation(); loadSample(); }} className="tab-btn"
                   style={{ padding: "8px 16px", borderRadius: 6, background: "#3b82f620", color: "#3b82f6", fontSize: 12, fontWeight: 500 }}>

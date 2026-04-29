@@ -14,8 +14,9 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
-CSV_PATH = Path(__file__).parent.parent / "data" / "crm_customers_v2.csv"
-OUT_DIR = Path(__file__).parent / "etl_out"
+ROOT = Path(__file__).resolve().parent.parent
+CSV_PATH = ROOT / "data" / "raw" / "crm_customers_v2.csv"
+OUT_DIR = ROOT / "sql" / "generated"
 OUT_DIR.mkdir(exist_ok=True)
 
 
