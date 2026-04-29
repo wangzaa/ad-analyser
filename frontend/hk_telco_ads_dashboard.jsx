@@ -1,835 +1,1227 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+const { useState, useCallback, useRef, useMemo, useEffect } = React;
 
-/* ───────────────────────── CSV PARSER ───────────────────────── */
+// ── SUPABASE ──────────────────────────────────────────────────────────────────
+
+const SUPABASE_URL = "https://mlsjehglsotapwvalbor.supabase.co";
+const SUPABASE_KEY = "sb_publishable_NLslAfmD7P0Nfu3MJXjSow_4Ole91rH";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const SUPABASE_SELECT_FIELDS = [
+  "external_customer_id",
+  "campaign_name",
+  "ad_set_name",
+  "plan_type",
+  "monthly_arpu_hkd",
+  "status",
+  "realized_revenue_hkd",
+  "projected_ltv_24mo_hkd",
+  "months_active",
+];
+
+// ── UTILS ─────────────────────────────────────────────────────────────────────
+
+const num = s => { const m = String(s).match(/[\d.]+/); return m ? parseFloat(m[0]) : 0; };
+const fmt = n => n >= 1000000 ? `${(n/1000000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : Number(n).toFixed(0);
+const fmtHKD = n => `HKD ${fmt(n)}`;
+const fmtDate = d => d ? d.toISOString().slice(0, 10) : '';
+
+// Handles ISO (YYYY-MM-DD) and HK convention DD/MM/YYYY (also DD-MM-YYYY)
+function parseDate(s) {
+  if (!s) return null;
+  const str = String(s).trim();
+  let m = str.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+  m = str.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+  if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function parseCSV(text) {
-  const lines = text.trim().split("\n");
-  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
-  return lines.slice(1).map(line => {
-    const vals = [];
-    let cur = "", inQ = false;
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length < 2) return { headers: [], rows: [] };
+  const parseRow = line => {
+    const fields = []; let inQ = false, cur = '';
     for (const ch of line) {
-      if (ch === '"') { inQ = !inQ; continue; }
-      if (ch === "," && !inQ) { vals.push(cur.trim()); cur = ""; continue; }
-      cur += ch;
+      if (ch === '"') inQ = !inQ;
+      else if (ch === ',' && !inQ) { fields.push(cur.replace(/"/g, '').trim()); cur = ''; }
+      else cur += ch;
     }
-    vals.push(cur.trim());
-    const obj = {};
-    headers.forEach((h, i) => { obj[h] = vals[i] || ""; });
-    return obj;
+    fields.push(cur.replace(/"/g, '').trim());
+    return fields;
+  };
+  const headers = parseRow(lines[0]);
+  const rows = lines.slice(1).map(line => {
+    const vals = parseRow(line);
+    const row = {};
+    headers.forEach((h, j) => { row[h] = vals[j] ?? ''; });
+    return row;
   });
+  return { headers, rows };
 }
 
 function detectPlatform(headers) {
-  const h = headers.join(" ").toLowerCase();
-  if (h.includes("by day") && h.includes("video views at 25%")) return "douyin";
-  if (h.includes("reporting starts") && h.includes("amount spent")) return "meta";
-  if (h.includes("customer_id") && h.includes("projected_ltv")) return "crm";
-  if (h.includes("age") && h.includes("gender") && h.includes("cost per result")) return "meta_demo";
-  return "unknown";
+  const lc = headers.map(h => h.toLowerCase());
+  if (lc.some(h => h.includes('customer_id'))) return 'crm';
+  if (lc.some(h => h.includes('amount spent') || h.includes('reporting starts') || h.includes('amount spent (hkd)'))) return 'meta';
+  if (lc.some(h => h.includes('6-second video') || h.includes('cost (hkd)') || h.includes('advertiser id') || h.includes('by day'))) return 'douyin';
+  if (headers.some(h => ['Campaign Name', 'Ad Set Name', 'Ad Name'].includes(h))) return 'meta';
+  if (headers.some(h => ['Campaign ID', 'Ad Group ID'].includes(h))) return 'douyin';
+  return null;
 }
 
-function num(v) { const n = parseFloat(String(v).replace(/[^0-9.\-]/g, "")); return isNaN(n) ? 0 : n; }
+// ── HEADER ALIAS DICTIONARY ───────────────────────────────────────────────────
 
-/* ───────────────────────── NORMALISE ───────────────────────── */
-function normaliseMeta(rows) {
-  return rows.map(r => ({
-    date: r["Reporting starts"],
-    campaign: r["Campaign name"],
-    adSet: r["Ad set name"],
-    ad: r["Ad name"],
-    platform: "Meta",
-    spend: num(r["Amount spent (HKD)"]),
-    impressions: num(r["Impressions"]),
-    reach: num(r["Reach"]),
-    frequency: num(r["Frequency"]),
-    linkClicks: num(r["Link clicks"]),
-    linkCTR: num(r["CTR (link click) %"]),
-    cpc: num(r["CPC (HKD, link click)"]),
-    cpm: num(r["CPM (HKD)"]),
-    results: num(r["Results"]),
-    costPerResult: num(r["Cost per result (HKD)"]),
-    videoCompletion50: null,
-    videoCompletion75: r["Video plays at 75%"] ? num(r["Video plays at 75%"]) / Math.max(1, num(r["Video plays"])) * 100 : null,
-  }));
+// Defaults baked into the bundle. column_aliases.json (loaded at startup) overrides these.
+const DEFAULT_ALIASES = {
+  meta: {
+    Spend:        ['Amount Spent (HKD)', 'Amount spent (HKD)', 'Spend'],
+    Impressions:  ['Impressions'],
+    Clicks:       ['Link Clicks', 'Link clicks', 'Clicks (All)', 'Unique Link Clicks', 'Outbound Clicks', 'Button Clicks', 'Clicks'],
+    CTR:          ['CTR (Link Click-Through Rate)', 'CTR (link click) %', 'CTR (link click)', 'CTR (All)', 'CTR'],
+    CPA:          ['Cost Per Link Click (HKD)', 'Cost per Result (HKD)', 'Cost per result (HKD)', 'CPC (Cost Per Click) (HKD)', 'Cost Per Click (All) (HKD)', 'CPC (HKD, link click)', 'Cost per result', 'CPC (HKD)'],
+    Conversions:  ['Conversions', 'Results'],
+    Frequency:    ['Frequency'],
+    Date:         ['Reporting starts', 'Reporting ends', 'Date', 'Day'],
+    CampaignName: ['Campaign Name', 'Campaign name'],
+    AdSetName:    ['Ad Set Name', 'Ad set name'],
+    AdName:       ['Ad Name', 'Ad name'],
+  },
+  douyin: {
+    Spend:        ['Cost (HKD)', 'Spend (HKD)', 'Cost', 'Spend'],
+    Impressions:  ['Impressions'],
+    Clicks:       ['Clicks', 'Clicks (destination)', 'Ad Interactions', 'Click'],
+    CTR:          ['CTR (%)', 'CTR (destination) %', 'CTR (destination)', 'Click-Through Rate (%)', 'CTR'],
+    CPA:          ['Cost per Result (HKD)', 'Cost Per Result (HKD)', 'Cost per conversion (HKD)', 'CPC (HKD)', 'Cost Per Click (HKD)', 'Cost per Result', 'Cost Per Conversion'],
+    Conversions:  ['Conversions', 'Results', 'Result'],
+    Frequency:    ['Frequency'],
+    Date:         ['By Day', 'Date', 'Day', 'Reporting starts'],
+    CampaignName: ['Campaign Name', 'Campaign name'],
+    AdSetName:    ['Ad Group Name', 'Ad Set Name', 'Ad group name'],
+    AdName:       ['Ad Name', 'Ad name'],
+  },
+};
+
+// Mutable, replaced when column_aliases.json loads.
+let ALIASES = DEFAULT_ALIASES;
+
+const FIELDS = [
+  { key: 'Spend',        label: 'Spend' },
+  { key: 'Impressions',  label: 'Impressions' },
+  { key: 'Clicks',       label: 'Clicks' },
+  { key: 'CTR',          label: 'CTR' },
+  { key: 'CPA',          label: 'CPA' },
+  { key: 'Conversions',  label: 'Conversions' },
+  { key: 'Frequency',    label: 'Frequency' },
+  { key: 'Date',         label: 'Date' },
+  { key: 'CampaignName', label: 'Campaign Name' },
+  { key: 'AdSetName',    label: 'Ad Set Name' },
+  { key: 'AdName',       label: 'Ad Name' },
+];
+
+// Case- and punctuation-insensitive header normalisation
+const normKey = s => String(s).toLowerCase().replace(/[()%,\-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// Returns { Spend: 'Amount spent (HKD)', Clicks: null, ... } using the live ALIASES dict
+function detectFields(headers, platform) {
+  const dict = ALIASES[platform] || {};
+  const normToOrig = {};
+  headers.forEach(h => { normToOrig[normKey(h)] = h; });
+  const result = {};
+  for (const stdName of Object.keys(dict)) {
+    const candidates = dict[stdName] || [];
+    const matched = candidates.map(c => normToOrig[normKey(c)]).find(h => h);
+    result[stdName] = matched || null;
+  }
+  return result;
 }
 
-function normaliseDouyin(rows) {
-  return rows.map(r => ({
-    date: r["By Day"],
-    campaign: r["Campaign name"],
-    adSet: r["Ad group name"],
-    ad: r["Ad name"],
-    platform: "Douyin",
-    spend: num(r["Cost (HKD)"]),
-    impressions: num(r["Impressions"]),
-    reach: num(r["Reach"]),
-    frequency: num(r["Frequency"]),
-    linkClicks: num(r["Clicks (destination)"]),
-    linkCTR: num(r["CTR (destination) %"]),
-    cpc: num(r["CPC (HKD)"]),
-    cpm: num(r["CPM (HKD)"]),
-    results: num(r["Conversions"]),
-    costPerResult: num(r["Cost per conversion (HKD)"]),
-    videoCompletion50: r["Video views at 50%"] ? num(r["Video views at 50%"]) / Math.max(1, num(r["Video views"])) * 100 : null,
-    videoCompletion75: r["Video views at 75%"] ? num(r["Video views at 75%"]) / Math.max(1, num(r["Video views"])) * 100 : null,
-  }));
+// ── LOCAL STORAGE FOR USER OVERRIDES ──────────────────────────────────────────
+
+// Key combines platform + sorted-headers fingerprint, so the same export shape reuses the user's last mapping
+function overrideKey(platform, headers) {
+  const fingerprint = [...headers].sort().join('|');
+  return `aliasOverride::${platform}::${fingerprint}`;
 }
 
-/* ───────────────────────── AGGREGATION ───────────────────────── */
-function aggByKey(rows, keyFn) {
-  const m = {};
-  rows.forEach(r => {
-    const k = keyFn(r);
-    if (!m[k]) m[k] = { key: k, rows: [], spend: 0, impressions: 0, reach: 0, linkClicks: 0, results: 0, ...r };
-    m[k].rows.push(r);
-    m[k].spend += r.spend;
-    m[k].impressions += r.impressions;
-    m[k].reach += r.reach;
-    m[k].linkClicks += r.linkClicks;
-    m[k].results += r.results;
+function loadOverride(platform, headers) {
+  try {
+    const raw = localStorage.getItem(overrideKey(platform, headers));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function saveOverride(platform, headers, fieldMap) {
+  try { localStorage.setItem(overrideKey(platform, headers), JSON.stringify(fieldMap)); } catch (e) {}
+}
+
+// ── NORMALISATION ─────────────────────────────────────────────────────────────
+
+const pickByMap = (row, fieldMap, std) => {
+  const h = fieldMap[std];
+  return h && row[h] != null ? row[h] : '';
+};
+
+function normaliseRows(rawRows, fieldMap, platform) {
+  const warnings = [];
+  const out = rawRows.map(row => {
+    const impressions = num(pickByMap(row, fieldMap, 'Impressions'));
+    const clicks = num(pickByMap(row, fieldMap, 'Clicks'));
+    const spend = num(pickByMap(row, fieldMap, 'Spend'));
+    const cpa = num(pickByMap(row, fieldMap, 'CPA'));
+    const ctrField = pickByMap(row, fieldMap, 'CTR');
+    const ctr = ctrField ? num(ctrField) : (impressions > 0 ? (clicks / impressions) * 100 : 0);
+    const date = parseDate(pickByMap(row, fieldMap, 'Date'));
+    return {
+      campaign_name: pickByMap(row, fieldMap, 'CampaignName'),
+      ad_set_name:   pickByMap(row, fieldMap, 'AdSetName'),
+      ad_name:       pickByMap(row, fieldMap, 'AdName'),
+      platform: platform === 'meta' ? 'Meta' : 'Douyin',
+      spend, impressions, clicks, ctr, cpa,
+      frequency: num(pickByMap(row, fieldMap, 'Frequency')),
+      conversions: num(pickByMap(row, fieldMap, 'Conversions')),
+      date, dateStr: fmtDate(date),
+    };
   });
-  return Object.values(m).map(g => ({
-    ...g,
-    cpa: g.results > 0 ? g.spend / g.results : 0,
-    ctr: g.impressions > 0 ? g.linkClicks / g.impressions * 100 : 0,
-    cpm: g.impressions > 0 ? g.spend / g.impressions * 1000 : 0,
-    frequency: g.reach > 0 ? g.impressions / g.reach : 0,
-  }));
+  const zeroImp = out.filter(r => r.impressions === 0).length;
+  if (zeroImp > 0) warnings.push(`${zeroImp} row${zeroImp > 1 ? 's' : ''} with zero impressions, excluded from analysis`);
+  const valid = out.filter(r => r.impressions > 0);
+  if (valid.length > 0 && valid.every(r => r.clicks === 0) && !fieldMap.Clicks) {
+    warnings.push(`Clicks column not mapped — set it manually in the field preview below`);
+  }
+  return { rows: valid, warnings };
 }
 
-function dailyTrend(rows) {
-  const byDate = {};
-  rows.forEach(r => {
-    if (!byDate[r.date]) byDate[r.date] = { date: r.date, spend: 0, impressions: 0, clicks: 0, results: 0 };
-    byDate[r.date].spend += r.spend;
-    byDate[r.date].impressions += r.impressions;
-    byDate[r.date].clicks += r.linkClicks;
-    byDate[r.date].results += r.results;
+function aggByKey(data, key) {
+  const agg = {};
+  data.forEach(row => {
+    const k = row[key] || '(unset)';
+    if (!agg[k]) agg[k] = {
+      [key]: k, spend: 0, impressions: 0, clicks: 0, conversions: 0, platform: row.platform,
+      _ctrW: 0, _ctrImp: 0, _cpaW: 0, _cpaSpend: 0,
+    };
+    agg[k].spend += row.spend || 0;
+    agg[k].impressions += row.impressions || 0;
+    agg[k].clicks += row.clicks || 0;
+    agg[k].conversions += row.conversions || 0;
+    if (row.ctr > 0) { agg[k]._ctrW += row.ctr * row.impressions; agg[k]._ctrImp += row.impressions; }
+    if (row.cpa > 0) { agg[k]._cpaW += row.cpa * row.spend; agg[k]._cpaSpend += row.spend; }
   });
-  return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date)).map(d => ({
-    ...d,
-    ctr: d.impressions > 0 ? d.clicks / d.impressions * 100 : 0,
-    cpa: d.results > 0 ? d.spend / d.results : 0,
+  return Object.values(agg).map(r => ({
+    ...r,
+    ctr: r.clicks > 0 ? (r.clicks / r.impressions) * 100 : r._ctrImp > 0 ? r._ctrW / r._ctrImp : 0,
+    cpa: r.clicks > 0 ? r.spend / r.clicks : r._cpaSpend > 0 ? r._cpaW / r._cpaSpend : 0,
   }));
 }
 
-/* ───────────────────────── SAMPLE DATA ───────────────────────── */
-async function loadSampleCSV(filename) {
-  const resp = await fetch(`/mnt/user-data/outputs/${filename}`);
-  return await resp.text();
+const CRM_SCHEMA = [
+  { name: 'customer_id',          required: true,  desc: 'Unique customer identifier (e.g., HK_CUST_00012). Used to dedupe and count customers.' },
+  { name: 'campaign_name',        required: true,  desc: 'Campaign name from Meta or Douyin export. Joins CRM rows to ad data.' },
+  { name: 'ad_set_name',          required: true,  desc: 'Ad set / ad group name. Primary join key for the LTV:CPA leaderboard.' },
+  { name: 'monthly_arpu_hkd',     required: true,  desc: 'Monthly average revenue per user, in HKD. Used to compute long-term value.' },
+  { name: 'status',               required: true,  desc: 'Customer state: active, churned, or pending. Used for retention/cohort analysis.' },
+  { name: 'realized_revenue_hkd', required: true,  desc: 'Total revenue realised since acquisition, in HKD. Numerator of LTV:CPA.' },
+  { name: 'plan_type',            required: false, desc: 'Plan SKU (e.g., 5G_Family_500GB). Drives the Plan Mix donut.' },
+  { name: 'tenure_months',        required: false, desc: 'Months since signup. Used for cohort retention curves.' },
+];
+
+const REQUIRED_CRM = CRM_SCHEMA.filter(c => c.required).map(c => c.name);
+
+function processCRM(rows, campaignData) {
+  const headers = Object.keys(rows[0] || {}).map(h => h.toLowerCase());
+  const missing = REQUIRED_CRM.filter(c => !headers.includes(c));
+  if (missing.length > 0) return { error: `Column${missing.length > 1 ? 's' : ''} not found: ${missing.join(', ')}. Check your CRM export settings.` };
+
+  const adSetNames = new Set(campaignData.map(r => r.ad_set_name));
+  const warnings = [];
+  let joined = 0;
+  rows.forEach(r => { if (adSetNames.has(r.ad_set_name)) joined++; });
+
+  const joinPct = rows.length > 0 ? (joined / rows.length) * 100 : 0;
+  if (joinPct < 50 && campaignData.length > 0) {
+    warnings.push(`Low join rate (${joinPct.toFixed(0)}%). Check that campaign/ad set names match between CRM and ad platform exports.`);
+  }
+
+  return { rows, warnings, joinRate: { joined, total: rows.length, unmatched: rows.length - joined } };
 }
 
-/* ───────────────────────── SPARKLINE ───────────────────────── */
-function Spark({ data, dataKey, color = "#3b82f6", w = 120, h = 32 }) {
-  if (!data || data.length < 2) return null;
-  const vals = data.map(d => d[dataKey]);
-  const mn = Math.min(...vals), mx = Math.max(...vals);
-  const range = mx - mn || 1;
-  const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * w},${h - ((v - mn) / range) * (h - 4) - 2}`).join(" ");
-  const trend = vals[vals.length - 1] - vals[0];
-  return (
-    <svg width={w} height={h} style={{ display: "block" }}>
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
-      <circle cx={(vals.length - 1) / (vals.length - 1) * w} cy={h - ((vals[vals.length - 1] - mn) / range) * (h - 4) - 2} r="2.5" fill={color} />
-    </svg>
-  );
+function buildLeaderboard(crmRows, campaignData) {
+  const platformCPA = {};
+  aggByKey(campaignData, 'ad_set_name').forEach(r => { platformCPA[r.ad_set_name] = r.cpa; });
+
+  const byAdSet = {};
+  crmRows.forEach(r => {
+    const k = r.ad_set_name || '(unknown)';
+    if (!byAdSet[k]) byAdSet[k] = { ad_set_name: k, count: 0, totalARPU: 0, totalRevenue: 0, totalAcqCost: 0 };
+    byAdSet[k].count++;
+    byAdSet[k].totalARPU += num(r.monthly_arpu_hkd || 0);
+    byAdSet[k].totalRevenue += num(r.realized_revenue_hkd || 0);
+    byAdSet[k].totalAcqCost += num(r.acquisition_cost || 0);
+  });
+
+  return Object.values(byAdSet).map(r => {
+    const avgRevenue = r.totalRevenue / r.count;
+    const cpa = r.totalAcqCost > 0 ? r.totalAcqCost / r.count : (platformCPA[r.ad_set_name] || 0);
+    return { ...r, avgARPU: r.totalARPU / r.count, avgRevenue, cpa, ltvCpa: cpa > 0 ? avgRevenue / cpa : 0 };
+  }).sort((a, b) => b.ltvCpa - a.ltvCpa);
 }
 
-/* ───────────────────────── MINI BAR ───────────────────────── */
-function MiniBar({ value, max, color = "#3b82f6" }) {
+function buildPlanMix(rows) {
+  const mix = {};
+  rows.forEach(r => { const k = r.plan_type || r.product_type || '(unknown)'; mix[k] = (mix[k] || 0) + 1; });
+  return Object.entries(mix).map(([label, value]) => ({ label, value }));
+}
+
+// ── COMPONENTS ────────────────────────────────────────────────────────────────
+
+function KPI({ label, value, sub, badge, badgeType }) {
+  const badgeColor = badgeType === 'verified'
+    ? { bg: '#d1fae5', text: '#065f46' }
+    : { bg: '#fef3c7', text: '#92400e' };
   return (
-    <div style={{ width: "100%", height: 4, background: "#1a1d2e", borderRadius: 2 }}>
-      <div style={{ width: `${Math.min(100, (value / max) * 100)}%`, height: "100%", background: color, borderRadius: 2, transition: "width 0.4s ease" }} />
+    <div style={{ padding: '16px', background: '#fff', borderRadius: '8px', borderLeft: '4px solid #3b82f6' }}>
+      <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
+      <div style={{ fontSize: '22px', fontWeight: '600', color: '#111827' }}>{value}</div>
+      {badge && (
+        <div style={{ marginTop: '5px', display: 'inline-block', fontSize: '10px', padding: '2px 7px', background: badgeColor.bg, color: badgeColor.text, borderRadius: '4px' }}>
+          {badge}
+        </div>
+      )}
+      {sub && <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>{sub}</div>}
     </div>
   );
 }
 
-/* ───────────────────────── DROP ZONE ───────────────────────── */
-function DropZone({ onFiles, label, accept, children, compact }) {
-  const [drag, setDrag] = useState(false);
-  const ref = useRef();
-  const handleDrop = useCallback(e => {
-    e.preventDefault(); setDrag(false);
-    const files = Array.from(e.dataTransfer?.files || e.target?.files || []);
-    if (files.length) onFiles(files);
-  }, [onFiles]);
+function Donut({ data }) {
+  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6'];
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return <div style={{ color: '#9ca3af', fontSize: '13px' }}>No data</div>;
+  const W = 140, H = 140, r = 58, ir = 34, cx = W / 2, cy = H / 2;
+  let angle = -Math.PI / 2;
+  const paths = data.map((d, i) => {
+    const sa = (d.value / total) * 2 * Math.PI;
+    const x1 = cx + r * Math.cos(angle), y1 = cy + r * Math.sin(angle);
+    const x2 = cx + r * Math.cos(angle + sa), y2 = cy + r * Math.sin(angle + sa);
+    const x3 = cx + ir * Math.cos(angle + sa), y3 = cy + ir * Math.sin(angle + sa);
+    const x4 = cx + ir * Math.cos(angle), y4 = cy + ir * Math.sin(angle);
+    const lg = sa > Math.PI ? 1 : 0;
+    const pd = `M${x1},${y1} A${r},${r} 0 ${lg},1 ${x2},${y2} L${x3},${y3} A${ir},${ir} 0 ${lg},0 ${x4},${y4}Z`;
+    angle += sa;
+    return <path key={i} d={pd} fill={COLORS[i % COLORS.length]} />;
+  });
   return (
-    <div onDragOver={e => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={handleDrop}
-      style={{ border: `2px dashed ${drag ? "#3b82f6" : "#ffffff15"}`, borderRadius: 12, padding: compact ? "14px 16px" : "28px 20px",
-        textAlign: "center", cursor: "pointer", transition: "all 0.2s", background: drag ? "#3b82f610" : "#ffffff03" }}
-      onClick={() => ref.current?.click()}>
-      <input ref={ref} type="file" accept={accept || ".csv"} multiple style={{ display: "none" }} onChange={handleDrop} />
-      {children || <>
-        <div style={{ fontSize: 13, color: "#ffffff60", marginBottom: 4 }}>{label || "Drop CSV files here"}</div>
-        <div style={{ fontSize: 11, color: "#ffffff30" }}>or click to browse</div>
-      </>}
+    <div style={{ display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
+      <svg width={W} height={H}>{paths}</svg>
+      <div style={{ fontSize: '12px', lineHeight: '1.8' }}>
+        {data.map((d, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '2px', background: COLORS[i % COLORS.length], flexShrink: 0 }} />
+            <span>{d.label}: {((d.value / total) * 100).toFixed(1)}%</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
-/* ───────────────────────── CHIP ───────────────────────── */
-function Chip({ label, sub, color, onRemove }) {
+function Banner({ type, message, onDismiss }) {
+  const s = { success: ['#d1fae5','#065f46'], warning: ['#fef3c7','#92400e'], error: ['#fee2e2','#991b1b'], info: ['#eff6ff','#1e40af'] }[type] || ['#eff6ff','#1e40af'];
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 6, background: `${color}15`, border: `1px solid ${color}30`, fontSize: 11, color: `${color}cc`, marginRight: 6, marginBottom: 4 }}>
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: color }} />
-      {label} <span style={{ color: "#ffffff30" }}>{sub}</span>
-      {onRemove && <span onClick={onRemove} style={{ cursor: "pointer", marginLeft: 4, color: "#ffffff40" }}>×</span>}
+    <div style={{ padding: '10px 16px', borderRadius: '6px', marginBottom: '10px', background: s[0], color: s[1], display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '13px' }}>
+      <span>{message}</span>
+      {onDismiss && <button onClick={onDismiss} style={{ background: 'none', border: 'none', cursor: 'pointer', color: s[1], marginLeft: '12px', fontSize: '16px', lineHeight: 1 }}>x</button>}
+    </div>
+  );
+}
+
+function FileChip({ file, onRemove }) {
+  const colors = { Meta: '#1877f2', Douyin: '#ff0050', crm: '#7c3aed' };
+  const c = colors[file.platform] || '#6b7280';
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '7px', padding: '4px 10px 4px 8px', background: '#f8fafc', borderRadius: '20px', fontSize: '12px', border: '1px solid #e2e8f0' }}>
+      <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: c, flexShrink: 0 }} />
+      <span style={{ fontWeight: '500' }}>{file.name}</span>
+      <span style={{ color: '#9ca3af' }}>
+        {file.rowCount} rows · {file.platform}
+        {file.campaignCount ? ` · ${file.campaignCount} campaign${file.campaignCount > 1 ? 's' : ''}` : ''}
+        {file.warnings && file.warnings.length > 0 ? ` · ${file.warnings.length} warning${file.warnings.length > 1 ? 's' : ''}` : ''}
+        {file.savedMapping ? ' · saved mapping' : ''}
+      </span>
+      <button onClick={() => onRemove(file.name)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', padding: '0 2px', fontSize: '13px', lineHeight: 1 }}>x</button>
+    </div>
+  );
+}
+
+function InfoTip({ text }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{ position: 'relative', display: 'inline-block', marginLeft: '4px' }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      <span style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: '13px', height: '13px', borderRadius: '50%',
+        background: '#e5e7eb', color: '#6b7280',
+        fontSize: '9px', fontWeight: '700', cursor: 'help', fontStyle: 'italic'
+      }}>i</span>
+      {show && (
+        <span style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          marginBottom: '6px', padding: '6px 10px', background: '#1f2937', color: '#fff',
+          fontSize: '11px', fontWeight: '400', borderRadius: '4px', whiteSpace: 'normal',
+          width: '220px', textAlign: 'left', lineHeight: '1.4', zIndex: 10,
+          boxShadow: '0 2px 6px rgba(0,0,0,0.15)'
+        }}>{text}</span>
+      )}
     </span>
   );
 }
 
-/* ───────────────────────── KPI TILE ───────────────────────── */
-function KPI({ label, value, sub, color = "#ffffff" }) {
+// ── INGEST ZONE ───────────────────────────────────────────────────────────────
+
+function IngestZone({ files, onFiles, onRemoveFile, loading, title, hint }) {
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef(null);
+
+  const processFiles = useCallback(fileList => {
+    const arr = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith('.csv'));
+    if (arr.length) onFiles(arr);
+  }, [onFiles]);
+
   return (
-    <div style={{ background: "#0d0f1a", borderRadius: 10, padding: "12px 14px", border: "1px solid #ffffff08", flex: "1 1 0" }}>
-      <div style={{ fontSize: 10, color: "#ffffff40", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 700, color, letterSpacing: -0.5 }}>{value}</div>
-      {sub && <div style={{ fontSize: 10, color: "#ffffff30", marginTop: 2 }}>{sub}</div>}
+    <div style={{ marginBottom: '16px' }}>
+      <div
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => { e.preventDefault(); setDragging(false); processFiles(e.dataTransfer.files); }}
+        onClick={() => inputRef.current?.click()}
+        style={{
+          padding: '28px',
+          border: dragging ? '2px solid #3b82f6' : '2px dashed #d1d5db',
+          borderRadius: '8px', textAlign: 'center', cursor: 'pointer',
+          background: dragging ? '#eff6ff' : '#fafafa', transition: 'all 0.15s'
+        }}
+      >
+        {loading
+          ? <div style={{ color: '#6b7280' }}>Reading files...</div>
+          : <>
+              <div style={{ color: '#374151', fontWeight: '500' }}>{title}</div>
+              <div style={{ color: '#9ca3af', fontSize: '12px', marginTop: '4px' }}>{hint}</div>
+            </>
+        }
+        <input ref={inputRef} type="file" accept=".csv" multiple onChange={e => { processFiles(e.target.files); e.target.value = ''; }} style={{ display: 'none' }} />
+      </div>
+      {files.length > 0 && (
+        <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+          {files.map(f => <FileChip key={f.name} file={f} onRemove={onRemoveFile} />)}
+        </div>
+      )}
     </div>
   );
 }
 
-/* ───────────────────────── FLAG ───────────────────────── */
-function Flag({ cpa, cpaAvg, freq, ctrTrend }) {
-  if (freq > 3.5 && ctrTrend < -0.3) return <span style={{ color: "#ef4444" }}>🔴</span>;
-  if (cpa > cpaAvg * 1.3 || freq > 2.5) return <span style={{ color: "#f59e0b" }}>⚠️</span>;
-  return <span style={{ color: "#22c55e" }}>✅</span>;
-}
+// ── FIELD PREVIEW WITH MANUAL OVERRIDE ────────────────────────────────────────
 
-/* ───────────────────────── DONUT ───────────────────────── */
-function Donut({ data, size = 120 }) {
-  const total = data.reduce((s, d) => s + d.value, 0);
-  let cum = 0;
-  const r = size / 2, ir = r * 0.6;
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      {data.map((d, i) => {
-        const start = cum / total * 360;
-        cum += d.value;
-        const end = cum / total * 360;
-        const s1 = Math.PI / 180 * (start - 90), s2 = Math.PI / 180 * (end - 90);
-        const x1 = r + r * 0.85 * Math.cos(s1), y1 = r + r * 0.85 * Math.sin(s1);
-        const x2 = r + r * 0.85 * Math.cos(s2), y2 = r + r * 0.85 * Math.sin(s2);
-        const ix1 = r + ir * Math.cos(s1), iy1 = r + ir * Math.sin(s1);
-        const ix2 = r + ir * Math.cos(s2), iy2 = r + ir * Math.sin(s2);
-        const large = end - start > 180 ? 1 : 0;
-        return <path key={i} d={`M ${x1} ${y1} A ${r * 0.85} ${r * 0.85} 0 ${large} 1 ${x2} ${y2} L ${ix2} ${iy2} A ${ir} ${ir} 0 ${large} 0 ${ix1} ${iy1} Z`} fill={d.color} opacity={0.85} />;
-      })}
-    </svg>
-  );
-}
-
-/* ═══════════════════════════ MAIN ═══════════════════════════ */
-export default function Dashboard() {
-  const [tab, setTab] = useState(0);
-  const [files, setFiles] = useState([]);
-  const [normalised, setNormalised] = useState([]);
-  const [demoData, setDemoData] = useState(null);
-  const [crmData, setCrmData] = useState(null);
-  const [crmFiles, setCrmFiles] = useState([]);
-  const [drillCampaign, setDrillCampaign] = useState(null);
-  const [usingSample, setUsingSample] = useState(false);
-
-  const PLATFORM_COLORS = { Meta: "#3b82f6", Douyin: "#ec4899" };
-
-  /* ── File handling ── */
-  const handleCampaignFiles = useCallback(async (fileList) => {
-    const newFiles = [];
-    const newRows = [];
-    for (const f of fileList) {
-      const text = await f.text();
-      const rows = parseCSV(text);
-      if (!rows.length) continue;
-      const headers = Object.keys(rows[0]);
-      const platform = detectPlatform(headers);
-      if (platform === "meta_demo") {
-        setDemoData(rows);
-        newFiles.push({ name: f.name, platform: "Meta Demographics", rows: rows.length, color: "#8b5cf6" });
-        continue;
-      }
-      if (platform === "meta") {
-        newRows.push(...normaliseMeta(rows));
-        newFiles.push({ name: f.name, platform: "Meta", rows: rows.length, color: "#3b82f6" });
-      } else if (platform === "douyin") {
-        newRows.push(...normaliseDouyin(rows));
-        newFiles.push({ name: f.name, platform: "Douyin", rows: rows.length, color: "#ec4899" });
-      }
-    }
-    setFiles(prev => [...prev, ...newFiles]);
-    setNormalised(prev => [...prev, ...newRows]);
-  }, []);
-
-  const handleCRMFile = useCallback(async (fileList) => {
-    const f = fileList[0];
-    const text = await f.text();
-    const rows = parseCSV(text);
-    if (rows.length && detectPlatform(Object.keys(rows[0])) === "crm") {
-      setCrmData(rows);
-      setCrmFiles([{ name: f.name, rows: rows.length, color: "#10b981" }]);
-    }
-  }, []);
-
-  const loadSample = useCallback(async () => {
-    try {
-      const metaFam = await (await fetch("/api/files/mnt/user-data/outputs/meta_5g_family_plan.csv")).text().catch(() => null);
-      const metaRoam = await (await fetch("/api/files/mnt/user-data/outputs/meta_roaming_pass.csv")).text().catch(() => null);
-      const ttGamer = await (await fetch("/api/files/mnt/user-data/outputs/douyin_gamer_5g.csv")).text().catch(() => null);
-      const metaDemo = await (await fetch("/api/files/mnt/user-data/outputs/meta_5g_family_plan_demographics.csv")).text().catch(() => null);
-      const crm = await (await fetch("/api/files/mnt/user-data/outputs/crm_customers.csv")).text().catch(() => null);
-
-      const allFiles = [];
-      const allRows = [];
-
-      if (metaFam) { const r = parseCSV(metaFam); allRows.push(...normaliseMeta(r)); allFiles.push({ name: "meta_5g_family_plan.csv", platform: "Meta", rows: r.length, color: "#3b82f6" }); }
-      if (metaRoam) { const r = parseCSV(metaRoam); allRows.push(...normaliseMeta(r)); allFiles.push({ name: "meta_roaming_pass.csv", platform: "Meta", rows: r.length, color: "#3b82f6" }); }
-      if (ttGamer) { const r = parseCSV(ttGamer); allRows.push(...normaliseDouyin(r)); allFiles.push({ name: "douyin_gamer_5g.csv", platform: "Douyin", rows: r.length, color: "#ec4899" }); }
-      if (metaDemo) { const r = parseCSV(metaDemo); setDemoData(r); allFiles.push({ name: "meta_demographics.csv", platform: "Meta Demographics", rows: r.length, color: "#8b5cf6" }); }
-      if (crm) { const r = parseCSV(crm); setCrmData(r); setCrmFiles([{ name: "crm_customers.csv", rows: r.length, color: "#10b981" }]); }
-
-      if (allRows.length === 0) {
-        // Fallback: embed minimal sample data inline
-        loadEmbeddedSample();
-        return;
-      }
-      setFiles(allFiles);
-      setNormalised(allRows);
-      setUsingSample(true);
-    } catch {
-      loadEmbeddedSample();
-    }
-  }, []);
-
-  const loadEmbeddedSample = () => {
-    // Minimal inline sample for demo when files aren't fetchable
-    const sampleNorm = [];
-    const campaigns = [
-      { campaign: "HK_5G_FamilyPlan_Q4_2025", adSet: "FamilyPlan_Parents_30-45_HK", platform: "Meta", dailySpend: 800, ctr: 0.014, cvr: 0.030, cpm: 72 },
-      { campaign: "HK_5G_FamilyPlan_Q4_2025", adSet: "FamilyPlan_Lookalike_5G_Customers", platform: "Meta", dailySpend: 1200, ctr: 0.011, cvr: 0.022, cpm: 85 },
-      { campaign: "HK_5G_FamilyPlan_Q4_2025", adSet: "FamilyPlan_Broad_HK_25-55", platform: "Meta", dailySpend: 2200, ctr: 0.018, cvr: 0.008, cpm: 38 },
-      { campaign: "HK_5G_GamerUnlimited_Q4", adSet: "Gamers_M_18-25_HK_HighIntent", platform: "Douyin", dailySpend: 1500, ctr: 0.038, cvr: 0.042, cpm: 28 },
-      { campaign: "HK_5G_GamerUnlimited_Q4", adSet: "Gamers_LookalikeChurnedYouth", platform: "Douyin", dailySpend: 1200, ctr: 0.031, cvr: 0.035, cpm: 32 },
-      { campaign: "HK_RoamingPass_Asia_Q4_2025", adSet: "Roaming_TravellersGoldenWeek_HK", platform: "Meta", dailySpend: 4200, ctr: 0.010, cvr: 0.012, cpm: 55 },
-      { campaign: "HK_RoamingPass_Asia_Q4_2025", adSet: "Roaming_BizTravellers_HK_25-55", platform: "Meta", dailySpend: 2400, ctr: 0.008, cvr: 0.010, cpm: 58 },
-    ];
-    for (let day = 0; day < 14; day++) {
-      const d = `2025-11-${String(day + 1).padStart(2, "0")}`;
-      campaigns.forEach(c => {
-        const jitter = () => 1 + (Math.random() - 0.5) * 0.15;
-        const spend = c.dailySpend * jitter();
-        const imps = Math.round(spend / c.cpm * 1000 * jitter());
-        const clicks = Math.max(1, Math.round(imps * c.ctr * jitter()));
-        const results = Math.max(0, Math.round(clicks * c.cvr * jitter()));
-        const freq = 1.2 + day * (c.adSet.includes("Roaming") ? 0.27 : 0.05);
-        sampleNorm.push({
-          date: d, campaign: c.campaign, adSet: c.adSet, ad: "ad_v1", platform: c.platform,
-          spend, impressions: imps, reach: Math.round(imps / freq), frequency: freq,
-          linkClicks: clicks, linkCTR: clicks / imps * 100, cpc: spend / clicks,
-          cpm: spend / imps * 1000, results, costPerResult: results > 0 ? spend / results : 0,
-          videoCompletion50: null, videoCompletion75: null,
-        });
-      });
-    }
-
-    // CRM sample
-    const crmSample = [];
-    const plans = ["5G_Family_4Line", "5G_Family_2Line", "5G_Single_Premium", "5G_Single_Standard", "5G_Single_Basic", "5G_Gamer_Unlimited"];
-    const arpus = { "5G_Family_4Line": 588, "5G_Family_2Line": 388, "5G_Single_Premium": 488, "5G_Single_Standard": 298, "5G_Single_Basic": 198, "5G_Gamer_Unlimited": 348 };
-    let cid = 100001;
-    const adSetConfigs = [
-      { adSet: "FamilyPlan_Parents_30-45_HK", campaign: "HK_5G_FamilyPlan_Q4_2025", n: 47, planWeights: [0.45, 0.35, 0.15, 0.05, 0, 0], churn: 0.08 },
-      { adSet: "FamilyPlan_Lookalike_5G_Customers", campaign: "HK_5G_FamilyPlan_Q4_2025", n: 37, planWeights: [0.20, 0.30, 0.30, 0.20, 0, 0], churn: 0.12 },
-      { adSet: "FamilyPlan_Broad_HK_25-55", campaign: "HK_5G_FamilyPlan_Q4_2025", n: 105, planWeights: [0.05, 0.10, 0.10, 0.20, 0.55, 0], churn: 0.28 },
-      { adSet: "Gamers_M_18-25_HK_HighIntent", campaign: "HK_5G_GamerUnlimited_Q4", n: 90, planWeights: [0, 0, 0.20, 0.15, 0, 0.65], churn: 0.15 },
-      { adSet: "Gamers_LookalikeChurnedYouth", campaign: "HK_5G_GamerUnlimited_Q4", n: 60, planWeights: [0, 0, 0.20, 0.20, 0.05, 0.55], churn: 0.18 },
-    ];
-    adSetConfigs.forEach(cfg => {
-      for (let i = 0; i < cfg.n; i++) {
-        let planIdx = 0;
-        const r = Math.random();
-        let cum = 0;
-        for (let j = 0; j < cfg.planWeights.length; j++) { cum += cfg.planWeights[j]; if (r < cum) { planIdx = j; break; } }
-        const plan = plans[planIdx];
-        const arpu = arpus[plan];
-        const churned = Math.random() < cfg.churn;
-        const months = churned ? Math.floor(Math.random() * 4) + 1 : 5;
-        const realized = arpu * months;
-        const projected = churned ? realized : arpu * 24 * 0.7;
-        crmSample.push({
-          customer_id: `CUST${cid++}`, ad_set_name: cfg.adSet, campaign_name: cfg.campaign,
-          plan_type: plan, monthly_arpu_hkd: String(arpu), status: churned ? "churned" : "active",
-          months_active: String(months), realized_revenue_hkd: String(Math.round(realized)),
-          projected_ltv_24mo_hkd: String(Math.round(projected)),
-          cross_sell_broadband: Math.random() < 0.2 ? "Y" : "N",
-          cross_sell_entertainment: Math.random() < 0.15 ? "Y" : "N",
-          cross_sell_device_financing: Math.random() < 0.1 ? "Y" : "N",
-          age_band: ["18-24", "25-34", "35-44", "45-54"][Math.floor(Math.random() * 4)],
-          gender: Math.random() < 0.5 ? "male" : "female",
-        });
-      }
-    });
-
-    setFiles([
-      { name: "sample_meta.csv", platform: "Meta", rows: 14 * 5, color: "#3b82f6" },
-      { name: "sample_douyin.csv", platform: "Douyin", rows: 14 * 2, color: "#ec4899" },
-    ]);
-    setNormalised(sampleNorm);
-    setCrmData(crmSample);
-    setCrmFiles([{ name: "sample_crm.csv", rows: crmSample.length, color: "#10b981" }]);
-    setUsingSample(true);
-  };
-
-  const reset = () => { setFiles([]); setNormalised([]); setDemoData(null); setCrmData(null); setCrmFiles([]); setDrillCampaign(null); setUsingSample(false); };
-
-  /* ── Derived data ── */
-  const hasData = normalised.length > 0;
-  const totalSpend = normalised.reduce((s, r) => s + r.spend, 0);
-  const totalResults = normalised.reduce((s, r) => s + r.results, 0);
-  const totalImps = normalised.reduce((s, r) => s + r.impressions, 0);
-  const totalClicks = normalised.reduce((s, r) => s + r.linkClicks, 0);
-  const blendedCPA = totalResults > 0 ? totalSpend / totalResults : 0;
-  const blendedCTR = totalImps > 0 ? totalClicks / totalImps * 100 : 0;
-
-  const byChannel = aggByKey(normalised, r => r.platform);
-  const byAdSet = aggByKey(normalised, r => `${r.campaign}||${r.adSet}||${r.platform}`);
-  const trend = dailyTrend(normalised);
-  const campaigns = [...new Set(normalised.map(r => r.campaign))];
-
-  /* ── CRM join ── */
-  const crmByAdSet = {};
-  if (crmData) {
-    crmData.forEach(r => {
-      if (!r.ad_set_name) return;
-      const k = r.ad_set_name;
-      if (!crmByAdSet[k]) crmByAdSet[k] = { count: 0, realized: 0, projected: 0, churned: 0, plans: {}, bb: 0, ent: 0, dev: 0, ages: {}, genders: {} };
-      const g = crmByAdSet[k];
-      g.count++;
-      g.realized += num(r.realized_revenue_hkd);
-      g.projected += num(r.projected_ltv_24mo_hkd);
-      if (r.status === "churned") g.churned++;
-      g.plans[r.plan_type] = (g.plans[r.plan_type] || 0) + 1;
-      if (r.cross_sell_broadband === "Y") g.bb++;
-      if (r.cross_sell_entertainment === "Y") g.ent++;
-      if (r.cross_sell_device_financing === "Y") g.dev++;
-      if (r.age_band) g.ages[r.age_band] = (g.ages[r.age_band] || 0) + 1;
-      if (r.gender) g.genders[r.gender] = (g.genders[r.gender] || 0) + 1;
-    });
-  }
-
-  const ltvRows = byAdSet.map(a => {
-    const setName = a.key.split("||")[1];
-    const crm = crmByAdSet[setName];
-    return {
-      ...a,
-      setName,
-      crmCount: crm?.count || 0,
-      avgLTV: crm ? crm.projected / crm.count : 0,
-      ltvCPA: crm && a.cpa > 0 ? (crm.projected / crm.count) / a.cpa : 0,
-      churnPct: crm ? crm.churned / crm.count * 100 : 0,
-      plans: crm?.plans || {},
-      crossSell: crm ? { bb: crm.bb / crm.count * 100, ent: crm.ent / crm.count * 100, dev: crm.dev / crm.count * 100 } : null,
-    };
-  }).sort((a, b) => b.ltvCPA - a.ltvCPA);
-
-  /* ── Drill data ── */
-  const drillRows = drillCampaign ? normalised.filter(r => r.adSet === drillCampaign) : [];
-  const drillTrend = drillRows.length ? dailyTrend(drillRows) : [];
-
-  /* ── Product grouping ── */
-  function productGroup(campaign) {
-    if (campaign.includes("Family")) return "Family Plan";
-    if (campaign.includes("Gamer")) return "Gamer";
-    if (campaign.includes("Roaming")) return "Roaming";
-    return "Other";
-  }
-
-  const fmt = (n, d = 0) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : n.toFixed(d);
-  const fmtM = (n) => n >= 1000000 ? `${(n / 1000000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}K` : n.toFixed(0);
+function FieldPreview({ files, onMappingChange, onResetMapping }) {
+  if (files.length === 0) return null;
 
   return (
-    <div style={{ fontFamily: "'DM Sans', -apple-system, sans-serif", background: "#080a12", color: "#c8cad8", minHeight: "100vh" }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-      <style>{`
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-thumb { background: #ffffff15; border-radius: 2px; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-        .fade-in { animation: fadeIn 0.4s ease both; }
-        .tbl-row:hover { background: #ffffff06 !important; }
-        .tab-btn { border: none; cursor: pointer; transition: all 0.2s; font-family: inherit; }
-      `}</style>
-
-      {/* ── HEADER ── */}
-      <div style={{ padding: "20px 24px 0", borderBottom: "1px solid #ffffff08" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div>
-            <div style={{ fontSize: 10, letterSpacing: 2.5, color: "#ffffff30", textTransform: "uppercase", marginBottom: 2 }}>HK Telco · Ad Campaign Intelligence</div>
-            <h1 style={{ fontSize: 20, fontWeight: 700, color: "#eff0f6", letterSpacing: -0.5 }}>Campaign Dashboard</h1>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {hasData && <button onClick={reset} className="tab-btn" style={{ padding: "6px 12px", borderRadius: 6, background: "#ffffff08", color: "#ffffff50", fontSize: 11 }}>Reset</button>}
-            {usingSample && <span style={{ fontSize: 10, color: "#f59e0b80", background: "#f59e0b10", padding: "3px 8px", borderRadius: 4 }}>Sample Data</span>}
-          </div>
+    <div style={{ background: '#fff', borderRadius: '8px', padding: '14px 16px', marginBottom: '14px', border: '1px solid #f1f5f9' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+        <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Detected Fields ({files.length} file{files.length > 1 ? 's' : ''})
         </div>
-
-        {/* ── TABS ── */}
-        <div style={{ display: "flex", gap: 0, marginTop: 16 }}>
-          {[
-            { label: "Campaign Performance", icon: "📊" },
-            { label: "Customer Value", icon: "💎", locked: !crmData && !hasData },
-          ].map((t, i) => (
-            <button key={i} onClick={() => setTab(i)} className="tab-btn" style={{
-              padding: "10px 20px", fontSize: 12, fontWeight: tab === i ? 600 : 400,
-              color: t.locked ? "#ffffff20" : tab === i ? "#eff0f6" : "#ffffff50",
-              background: tab === i ? "#0d0f1a" : "transparent",
-              borderRadius: "8px 8px 0 0", borderBottom: tab === i ? "2px solid #3b82f6" : "2px solid transparent",
-            }}>
-              {t.icon} {t.label}
-              {t.locked && !crmData && <span style={{ fontSize: 9, marginLeft: 6, color: "#ffffff20" }}>🔒</span>}
-            </button>
-          ))}
+        <div style={{ fontSize: '11px', color: '#9ca3af' }}>
+          Click any cell to remap. Saved per export shape.
         </div>
       </div>
-
-      <div style={{ padding: "20px 24px" }}>
-
-        {/* ═══════════ TAB 1: CAMPAIGN PERFORMANCE ═══════════ */}
-        {tab === 0 && (
-          <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Drop zone / file chips */}
-            {!hasData ? (
-              <DropZone onFiles={handleCampaignFiles} label="Drop Meta & Douyin CSV exports here">
-                <div style={{ fontSize: 14, color: "#ffffff50", marginBottom: 6 }}>📁 Drop Meta & Douyin CSV exports here</div>
-                <div style={{ fontSize: 11, color: "#ffffff25", marginBottom: 12 }}>Auto-detects platform from headers · Multiple files OK</div>
-                <button onClick={e => { e.stopPropagation(); loadSample(); }} className="tab-btn"
-                  style={{ padding: "8px 16px", borderRadius: 6, background: "#3b82f620", color: "#3b82f6", fontSize: 12, fontWeight: 500 }}>
-                  Try with sample HK telco data
-                </button>
-              </DropZone>
-            ) : (
-              <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4 }}>
-                {files.map((f, i) => <Chip key={i} label={f.name} sub={`${f.rows} rows · ${f.platform}`} color={f.color} />)}
-                <DropZone onFiles={handleCampaignFiles} compact>
-                  <span style={{ fontSize: 11, color: "#ffffff30" }}>+ Add more</span>
-                </DropZone>
-              </div>
-            )}
-
-            {hasData && <>
-              {/* KPI strip */}
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <KPI label="Total Spend" value={`HKD ${fmtM(totalSpend)}`} sub={`${campaigns.length} campaigns`} />
-                <KPI label="Acquisitions" value={fmt(totalResults)} sub="Platform-reported" color={crmData ? "#22c55e" : "#ffffff"} />
-                <KPI label="Blended CPA" value={`HKD ${blendedCPA.toFixed(0)}`} sub={crmData ? "CRM-verified" : "Pixel-reported"} />
-                <KPI label="Link CTR" value={`${blendedCTR.toFixed(2)}%`} sub="Cross-channel" />
-                <KPI label="Channels" value={byChannel.length} sub={byChannel.map(c => c.key).join(" + ")} />
-              </div>
-
-              {/* Channel strip */}
-              <div style={{ display: "grid", gridTemplateColumns: `repeat(${byChannel.length}, 1fr)`, gap: 10 }}>
-                {byChannel.map(ch => {
-                  const chTrend = dailyTrend(normalised.filter(r => r.platform === ch.key));
-                  return (
-                    <div key={ch.key} style={{ background: "#0d0f1a", borderRadius: 10, padding: "14px 16px", border: `1px solid ${PLATFORM_COLORS[ch.key]}15` }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                        <span style={{ fontSize: 14, fontWeight: 600, color: PLATFORM_COLORS[ch.key] }}>{ch.key}</span>
-                        <span style={{ fontSize: 11, color: "#ffffff30" }}>{((ch.spend / totalSpend) * 100).toFixed(0)}% of spend</span>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: '6px 10px', color: '#6b7280', fontWeight: '600', borderBottom: '1px solid #e5e7eb', whiteSpace: 'nowrap' }}>Standard field</th>
+              {files.map(f => (
+                <th key={f.name} style={{ textAlign: 'left', padding: '6px 10px', color: '#374151', fontWeight: '600', borderBottom: '1px solid #e5e7eb', minWidth: '180px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                    <div>
+                      <div>{f.name}</div>
+                      <div style={{ fontSize: '10px', color: '#9ca3af', fontWeight: '400' }}>
+                        {f.platform}{f.savedMapping ? ' · saved mapping in use' : ''}
                       </div>
-                      <div style={{ display: "flex", gap: 16, fontSize: 11, color: "#ffffff50", marginBottom: 8 }}>
-                        <span>CPA <strong style={{ color: "#eff0f6" }}>HKD {ch.cpa.toFixed(0)}</strong></span>
-                        <span>CTR <strong style={{ color: "#eff0f6" }}>{ch.ctr.toFixed(2)}%</strong></span>
-                        <span>Freq <strong style={{ color: ch.frequency > 2.5 ? "#f59e0b" : "#eff0f6" }}>{ch.frequency.toFixed(1)}</strong></span>
-                      </div>
-                      <Spark data={chTrend} dataKey="ctr" color={PLATFORM_COLORS[ch.key]} w={200} h={28} />
-                      <div style={{ fontSize: 9, color: "#ffffff20", marginTop: 2 }}>CTR 14d trend</div>
                     </div>
+                    {f.savedMapping && (
+                      <button onClick={() => onResetMapping(f.name)}
+                        title="Clear saved mapping for this export shape"
+                        style={{ background: 'none', border: '1px solid #e5e7eb', borderRadius: '4px', padding: '2px 6px', fontSize: '10px', color: '#6b7280', cursor: 'pointer' }}>
+                        Reset
+                      </button>
+                    )}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {FIELDS.map(field => (
+              <tr key={field.key}>
+                <td style={{ padding: '6px 10px', color: '#374151', fontWeight: '500', borderBottom: '1px solid #f9fafb', whiteSpace: 'nowrap' }}>{field.label}</td>
+                {files.map(f => {
+                  const matched = f.fieldMap && f.fieldMap[field.key];
+                  return (
+                    <td key={f.name} style={{ padding: '6px 10px', borderBottom: '1px solid #f9fafb' }}>
+                      <select
+                        value={matched || ''}
+                        onChange={e => onMappingChange(f.name, field.key, e.target.value || null)}
+                        style={{
+                          width: '100%', padding: '4px 6px', fontSize: '11px',
+                          border: matched ? '1px solid #d1d5db' : '1px solid #fca5a5',
+                          borderRadius: '4px',
+                          background: matched ? '#fff' : '#fef2f2',
+                          color: matched ? '#065f46' : '#991b1b',
+                          fontFamily: matched ? 'monospace' : 'inherit',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <option value="">— not mapped —</option>
+                        {f.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                      </select>
+                    </td>
                   );
                 })}
-              </div>
-
-              {/* Campaign table */}
-              <div style={{ background: "#0d0f1a", borderRadius: 10, padding: "16px", border: "1px solid #ffffff08", overflowX: "auto" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "#eff0f6", marginBottom: 12 }}>Campaign Groups</div>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid #ffffff10" }}>
-                      {["Product", "Channel", "Ad Set", "Spend", "CPA", crmData ? "LTV:CPA" : "", "CTR", "Freq", "Trend", ""].filter(Boolean).map(h =>
-                        <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: "#ffffff30", fontWeight: 500, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {byAdSet.sort((a, b) => b.spend - a.spend).map((row, i) => {
-                      const [campaign, setName, platform] = row.key.split("||");
-                      const shortSet = setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "");
-                      const setTrend = dailyTrend(normalised.filter(r => r.adSet === setName));
-                      const crm = crmByAdSet[setName];
-                      const ltvRatio = crm && row.cpa > 0 ? (crm.projected / crm.count) / row.cpa : null;
-                      const ctrFirst = setTrend[0]?.ctr || 0;
-                      const ctrLast = setTrend[setTrend.length - 1]?.ctr || 0;
-                      const ctrDelta = ctrFirst > 0 ? (ctrLast - ctrFirst) / ctrFirst : 0;
-
-                      return (
-                        <tr key={i} className="tbl-row" onClick={() => setDrillCampaign(setName)} style={{ cursor: "pointer", borderBottom: "1px solid #ffffff06" }}>
-                          <td style={{ padding: "10px" }}><span style={{ padding: "2px 8px", borderRadius: 4, background: "#ffffff08", fontSize: 10 }}>{productGroup(campaign)}</span></td>
-                          <td style={{ padding: "10px" }}><span style={{ color: PLATFORM_COLORS[platform], fontWeight: 500 }}>{platform}</span></td>
-                          <td style={{ padding: "10px", color: "#eff0f6", fontWeight: 500, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortSet}</td>
-                          <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>HKD {fmtM(row.spend)}</td>
-                          <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>HKD {row.cpa.toFixed(0)}</td>
-                          {crmData && <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: ltvRatio > 30 ? "#22c55e" : ltvRatio > 10 ? "#f59e0b" : "#ef4444", fontWeight: 600 }}>
-                            {ltvRatio ? `${ltvRatio.toFixed(0)}x` : "—"}
-                          </td>}
-                          <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>{row.ctr.toFixed(2)}%</td>
-                          <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: row.frequency > 2.5 ? "#f59e0b" : "#ffffff80" }}>{row.frequency.toFixed(1)}</td>
-                          <td style={{ padding: "10px" }}><Spark data={setTrend} dataKey="ctr" color={PLATFORM_COLORS[platform]} w={80} h={20} /></td>
-                          <td style={{ padding: "10px" }}><Flag cpa={row.cpa} cpaAvg={blendedCPA} freq={row.frequency} ctrTrend={ctrDelta} /></td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                {!crmData && <div style={{ fontSize: 10, color: "#ffffff20", marginTop: 8, textAlign: "center" }}>Upload CRM data in Customer Value tab to unlock LTV:CPA column</div>}
-              </div>
-
-              {/* Drill-down */}
-              {drillCampaign && drillTrend.length > 0 && (
-                <div className="fade-in" style={{ background: "#0d0f1a", borderRadius: 10, padding: "16px", border: "1px solid #ffffff08" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#eff0f6" }}>{drillCampaign.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")}</div>
-                      <div style={{ fontSize: 10, color: "#ffffff30" }}>14-day drill-down · click another row to switch</div>
-                    </div>
-                    <button onClick={() => setDrillCampaign(null)} className="tab-btn" style={{ padding: "4px 10px", borderRadius: 4, background: "#ffffff08", color: "#ffffff40", fontSize: 10 }}>Close</button>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
-                    {[
-                      { label: "CTR Trend", key: "ctr", color: "#3b82f6", fmt: v => `${v.toFixed(2)}%` },
-                      { label: "CPA Trend", key: "cpa", color: "#f59e0b", fmt: v => `HKD ${v.toFixed(0)}` },
-                      { label: "Daily Spend", key: "spend", color: "#8b5cf6", fmt: v => `HKD ${fmtM(v)}` },
-                      { label: "Daily Results", key: "results", color: "#22c55e", fmt: v => v.toFixed(0) },
-                    ].map(m => {
-                      const last = drillTrend[drillTrend.length - 1][m.key];
-                      const first = drillTrend[0][m.key];
-                      const delta = first > 0 ? ((last - first) / first * 100) : 0;
-                      return (
-                        <div key={m.key} style={{ background: "#080a12", borderRadius: 8, padding: "10px 12px" }}>
-                          <div style={{ fontSize: 10, color: "#ffffff30", marginBottom: 4 }}>{m.label}</div>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                            <span style={{ fontSize: 16, fontWeight: 600, color: "#eff0f6" }}>{m.fmt(last)}</span>
-                            <span style={{ fontSize: 10, color: delta > 0 ? (m.key === "cpa" ? "#ef4444" : "#22c55e") : (m.key === "cpa" ? "#22c55e" : "#ef4444") }}>
-                              {delta > 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(0)}%
-                            </span>
-                          </div>
-                          <Spark data={drillTrend} dataKey={m.key} color={m.color} w={160} h={32} />
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </>}
-          </div>
-        )}
-
-        {/* ═══════════ TAB 2: CUSTOMER VALUE ═══════════ */}
-        {tab === 1 && (
-          <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* CRM upload zone */}
-            {!crmData ? (
-              <div style={{ textAlign: "center" }}>
-                <DropZone onFiles={handleCRMFile} label="Drop CRM customer CSV here">
-                  <div style={{ fontSize: 14, color: "#ffffff50", marginBottom: 6 }}>💎 Drop CRM Customer CSV here</div>
-                  <div style={{ fontSize: 11, color: "#ffffff25", marginBottom: 4 }}>Required: customer_id, campaign_name, ad_set_name, monthly_arpu_hkd, status, projected_ltv_24mo_hkd</div>
-                  {!hasData && <div style={{ fontSize: 11, color: "#f59e0b80", marginTop: 8 }}>Upload campaign data in Tab 1 first, then CRM here</div>}
-                </DropZone>
-                {!usingSample && <button onClick={loadSample} className="tab-btn" style={{ marginTop: 12, padding: "8px 16px", borderRadius: 6, background: "#10b98120", color: "#10b981", fontSize: 12, fontWeight: 500 }}>
-                  Load sample data (campaigns + CRM)
-                </button>}
-              </div>
-            ) : (
-              <>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {crmFiles.map((f, i) => <Chip key={i} label={f.name} sub={`${f.rows} customers`} color={f.color} />)}
-                  {hasData && <span style={{ fontSize: 10, color: "#22c55e80", background: "#22c55e10", padding: "3px 8px", borderRadius: 4 }}>✓ CRM joined to {byAdSet.length} ad sets</span>}
-                </div>
-
-                {/* LTV KPIs */}
-                {hasData && (
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <KPI label="Total Customers" value={Object.values(crmByAdSet).reduce((s, g) => s + g.count, 0)} color="#10b981" />
-                    <KPI label="Avg LTV" value={`HKD ${fmtM(Object.values(crmByAdSet).reduce((s, g) => s + g.projected, 0) / Math.max(1, Object.values(crmByAdSet).reduce((s, g) => s + g.count, 0)))}`} />
-                    <KPI label="Best LTV:CPA" value={ltvRows[0] ? `${ltvRows[0].ltvCPA.toFixed(0)}x` : "—"} sub={ltvRows[0]?.setName?.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")} color="#22c55e" />
-                    <KPI label="Worst LTV:CPA" value={ltvRows[ltvRows.length - 1] ? `${ltvRows[ltvRows.length - 1].ltvCPA.toFixed(0)}x` : "—"} sub={ltvRows[ltvRows.length - 1]?.setName?.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")} color="#ef4444" />
-                  </div>
-                )}
-
-                {/* LTV:CPA Leaderboard */}
-                {hasData && (
-                  <div style={{ background: "#0d0f1a", borderRadius: 10, padding: "16px", border: "1px solid #ffffff08" }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#eff0f6", marginBottom: 12 }}>LTV : CPA Leaderboard</div>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                      <thead>
-                        <tr style={{ borderBottom: "1px solid #ffffff10" }}>
-                          {["Rank", "Ad Set", "Channel", "Customers", "CPA", "Avg LTV", "LTV:CPA", "Churn", ""].map(h =>
-                            <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: "#ffffff30", fontWeight: 500, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ltvRows.filter(r => r.crmCount > 0).map((row, i) => (
-                          <tr key={i} className="tbl-row" style={{ borderBottom: "1px solid #ffffff06" }}>
-                            <td style={{ padding: "10px", fontWeight: 700, color: i < 3 ? "#f59e0b" : "#ffffff30" }}>{i + 1}</td>
-                            <td style={{ padding: "10px", color: "#eff0f6", fontWeight: 500 }}>{row.setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")}</td>
-                            <td style={{ padding: "10px", color: PLATFORM_COLORS[row.platform] }}>{row.platform}</td>
-                            <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>{row.crmCount}</td>
-                            <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>HKD {row.cpa.toFixed(0)}</td>
-                            <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>HKD {fmtM(row.avgLTV)}</td>
-                            <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, color: row.ltvCPA > 30 ? "#22c55e" : row.ltvCPA > 10 ? "#f59e0b" : "#ef4444" }}>{row.ltvCPA.toFixed(0)}x</td>
-                            <td style={{ padding: "10px", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: row.churnPct > 20 ? "#ef4444" : "#ffffff50" }}>{row.churnPct.toFixed(0)}%</td>
-                            <td style={{ padding: "10px", width: 80 }}><MiniBar value={row.ltvCPA} max={Math.max(...ltvRows.map(r => r.ltvCPA))} color={row.ltvCPA > 30 ? "#22c55e" : row.ltvCPA > 10 ? "#f59e0b" : "#ef4444"} /></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                {/* Plan Mix + Cross-sell */}
-                {hasData && (
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                    {/* Plan mix */}
-                    <div style={{ background: "#0d0f1a", borderRadius: 10, padding: "16px", border: "1px solid #ffffff08" }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#eff0f6", marginBottom: 12 }}>Plan Mix by Ad Set</div>
-                      {ltvRows.filter(r => r.crmCount > 0).map((row, i) => {
-                        const planColors = { "5G_Family_4Line": "#3b82f6", "5G_Family_2Line": "#60a5fa", "5G_Single_Premium": "#8b5cf6", "5G_Single_Standard": "#a78bfa", "5G_Single_Basic": "#ef4444", "5G_Gamer_Unlimited": "#ec4899" };
-                        const total = Object.values(row.plans).reduce((s, v) => s + v, 0);
-                        return (
-                          <div key={i} style={{ marginBottom: 12 }}>
-                            <div style={{ fontSize: 11, color: "#ffffff60", marginBottom: 4 }}>{row.setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")}</div>
-                            <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden" }}>
-                              {Object.entries(row.plans).sort((a, b) => b[1] - a[1]).map(([plan, count], j) => (
-                                <div key={j} title={`${plan}: ${count} (${(count / total * 100).toFixed(0)}%)`}
-                                  style={{ width: `${(count / total) * 100}%`, background: planColors[plan] || "#ffffff20", transition: "width 0.4s" }} />
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                        {[
-                          ["Family 4-Line", "#3b82f6"], ["Family 2-Line", "#60a5fa"], ["Premium", "#8b5cf6"],
-                          ["Standard", "#a78bfa"], ["Basic", "#ef4444"], ["Gamer", "#ec4899"]
-                        ].map(([l, c]) => (
-                          <span key={l} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9, color: "#ffffff40" }}>
-                            <span style={{ width: 6, height: 6, borderRadius: 2, background: c }} />{l}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Cross-sell */}
-                    <div style={{ background: "#0d0f1a", borderRadius: 10, padding: "16px", border: "1px solid #ffffff08" }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#eff0f6", marginBottom: 12 }}>Cross-sell Attach Rate</div>
-                      {ltvRows.filter(r => r.crossSell).map((row, i) => (
-                        <div key={i} style={{ marginBottom: 14 }}>
-                          <div style={{ fontSize: 11, color: "#ffffff60", marginBottom: 6 }}>{row.setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")}</div>
-                          <div style={{ display: "flex", gap: 8 }}>
-                            {[
-                              { label: "Broadband", val: row.crossSell.bb, color: "#3b82f6" },
-                              { label: "Entertainment", val: row.crossSell.ent, color: "#ec4899" },
-                              { label: "Device", val: row.crossSell.dev, color: "#f59e0b" },
-                            ].map(cs => (
-                              <div key={cs.label} style={{ flex: 1, background: "#080a12", borderRadius: 6, padding: "6px 8px" }}>
-                                <div style={{ fontSize: 9, color: "#ffffff30" }}>{cs.label}</div>
-                                <div style={{ fontSize: 14, fontWeight: 600, color: cs.color }}>{cs.val.toFixed(0)}%</div>
-                                <MiniBar value={cs.val} max={40} color={cs.color} />
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Demographic LTV breakdown */}
-                {hasData && (
-                  <div style={{ background: "#0d0f1a", borderRadius: 10, padding: "16px", border: "1px solid #ffffff08" }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#eff0f6", marginBottom: 4 }}>Demographic Breakdown</div>
-                    <div style={{ fontSize: 10, color: "#ffffff30", marginBottom: 12 }}>Customer count by age × gender per ad set — exposes targeting leaks</div>
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
-                        <thead>
-                          <tr style={{ borderBottom: "1px solid #ffffff10" }}>
-                            <th style={{ textAlign: "left", padding: "6px 8px", color: "#ffffff30" }}>Ad Set</th>
-                            {["18-24 M", "18-24 F", "25-34 M", "25-34 F", "35-44 M", "35-44 F", "45-54 M", "45-54 F"].map(h =>
-                              <th key={h} style={{ textAlign: "center", padding: "6px 4px", color: "#ffffff25", fontSize: 9 }}>{h}</th>
-                            )}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {ltvRows.filter(r => r.crmCount > 0).map((row, i) => {
-                            const crm = crmByAdSet[row.setName];
-                            if (!crm) return null;
-                            const cells = [
-                              ["18-24", "male"], ["18-24", "female"], ["25-34", "male"], ["25-34", "female"],
-                              ["35-44", "male"], ["35-44", "female"], ["45-54", "male"], ["45-54", "female"],
-                            ];
-                            const maxCount = Math.max(...cells.map(([a, g]) => {
-                              const ageCount = crm.ages[a] || 0;
-                              const genderCount = crm.genders[g] || 0;
-                              return Math.round(ageCount * genderCount / crm.count);
-                            }), 1);
-                            return (
-                              <tr key={i} className="tbl-row" style={{ borderBottom: "1px solid #ffffff06" }}>
-                                <td style={{ padding: "8px", color: "#ffffffa0", whiteSpace: "nowrap" }}>{row.setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "").substring(0, 25)}</td>
-                                {cells.map(([age, gender], j) => {
-                                  const approx = Math.round((crm.ages[age] || 0) * (crm.genders[gender] || 0) / Math.max(1, crm.count));
-                                  const intensity = Math.min(1, approx / Math.max(maxCount, 1));
-                                  const isLeak = row.setName.includes("Broad") && age === "18-24" && gender === "male";
-                                  return (
-                                    <td key={j} style={{
-                                      textAlign: "center", padding: "6px 4px",
-                                      background: isLeak ? `rgba(239,68,68,${intensity * 0.4})` : `rgba(59,130,246,${intensity * 0.3})`,
-                                      color: approx > 0 ? "#ffffffa0" : "#ffffff15",
-                                      fontFamily: "'JetBrains Mono', monospace",
-                                    }}>
-                                      {approx || "·"}
-                                    </td>
-                                  );
-                                })}
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {/* Insight callout */}
-                {hasData && ltvRows.length > 0 && (
-                  <div style={{ background: "linear-gradient(135deg, #0f1a12 0%, #0d0f1a 100%)", borderRadius: 10, padding: "16px", border: "1px solid #22c55e20" }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: "#22c55e", marginBottom: 6 }}>💡 Insight</div>
-                    <div style={{ fontSize: 12, color: "#ffffff70", lineHeight: 1.7 }}>
-                      {(() => {
-                        const best = ltvRows[0];
-                        const worst = ltvRows.filter(r => r.crmCount > 0).slice(-1)[0];
-                        if (!best || !worst) return "Upload more data to generate insights.";
-                        return `${best.setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")} delivers ${best.ltvCPA.toFixed(0)}x LTV:CPA — ${(best.ltvCPA / worst.ltvCPA).toFixed(1)}x more efficient than ${worst.setName.replace(/^(FamilyPlan_|Gamers_|Roaming_)/, "")} (${worst.ltvCPA.toFixed(0)}x). ${worst.churnPct > 20 ? `The underperformer has ${worst.churnPct.toFixed(0)}% churn — consider reallocating budget.` : ""}`;
-                      })()}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-
-      {/* Footer */}
-      <div style={{ padding: "16px 24px", borderTop: "1px solid #ffffff06", fontSize: 9, color: "#ffffff15", textAlign: "center" }}>
-        Cross-channel metrics use normalised definitions: link CTR, destination clicks, CRM-verified CPA when available · Platform-native metrics in drill-downs only · {new Date().toLocaleDateString()}
+      <div style={{ marginTop: '10px', fontSize: '11px', color: '#9ca3af' }}>
+        Auto-detection is case- and punctuation-insensitive. Manual overrides are saved to your browser
+        (keyed by platform + column-set) and reapplied automatically on future uploads with the same shape.
       </div>
     </div>
   );
 }
+
+// ── CAMPAIGN TAB ──────────────────────────────────────────────────────────────
+
+function CampaignTab({ data, crmLoaded, ltvByAdSet, aggregateLTVCPA, onOpenFields }) {
+  const [drill, setDrill] = useState(null);
+  const [dateMode, setDateMode] = useState('all');
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
+
+  const dateBounds = useMemo(() => {
+    const dates = data.map(r => r.date).filter(d => d);
+    if (dates.length === 0) return { min: null, max: null };
+    const ts = dates.map(d => d.getTime());
+    return { min: new Date(Math.min(...ts)), max: new Date(Math.max(...ts)) };
+  }, [data]);
+
+  const filteredData = useMemo(() => {
+    if (dateMode === 'all' || !dateBounds.max) return data;
+    if (dateMode === 'custom') {
+      if (!customStart || !customEnd) return data;
+      const s = new Date(customStart), e = new Date(customEnd);
+      e.setHours(23, 59, 59, 999);
+      return data.filter(r => r.date && r.date >= s && r.date <= e);
+    }
+    const days = { '7d': 7, '14d': 14, '28d': 28 }[dateMode];
+    const cutoff = new Date(dateBounds.max);
+    cutoff.setDate(cutoff.getDate() - (days - 1));
+    return data.filter(r => r.date && r.date >= cutoff && r.date <= dateBounds.max);
+  }, [data, dateMode, customStart, customEnd, dateBounds]);
+
+  const campaigns = useMemo(() => aggByKey(filteredData, 'campaign_name'), [filteredData]);
+
+  const totalSpend = filteredData.reduce((s, r) => s + r.spend, 0);
+  const totalImpressions = filteredData.reduce((s, r) => s + r.impressions, 0);
+  const totalClicks = filteredData.reduce((s, r) => s + r.clicks, 0);
+  const ctrW = filteredData.reduce((s, r) => s + r.ctr * r.impressions, 0);
+  const avgCTR = totalClicks > 0
+    ? (totalClicks / totalImpressions) * 100
+    : totalImpressions > 0 ? ctrW / totalImpressions : 0;
+  const cpaW = filteredData.reduce((s, r) => s + r.cpa * r.spend, 0);
+  const avgCPA = totalClicks > 0
+    ? totalSpend / totalClicks
+    : totalSpend > 0 ? cpaW / totalSpend : 0;
+  const metaSpend = filteredData.filter(r => r.platform === 'Meta').reduce((s, r) => s + r.spend, 0);
+  const douyinSpend = filteredData.filter(r => r.platform === 'Douyin').reduce((s, r) => s + r.spend, 0);
+
+  const drillData = drill ? aggByKey(filteredData.filter(r => r.campaign_name === drill), 'ad_set_name') : null;
+
+  const datePresets = [['all', 'All'], ['7d', 'L7D'], ['14d', 'L14D'], ['28d', 'L28D'], ['custom', 'Custom']];
+  const dateBtn = active => ({
+    padding: '5px 12px', border: '1px solid #e5e7eb', borderRadius: '5px',
+    background: active ? '#1e40af' : '#fff', color: active ? '#fff' : '#374151',
+    fontSize: '12px', cursor: 'pointer', fontWeight: active ? '600' : '400',
+  });
+
+  const TH = ({ children, right }) => (
+    <th style={{ textAlign: right ? 'right' : 'left', padding: '8px 10px', color: '#6b7280', fontWeight: '600', fontSize: '12px', borderBottom: '2px solid #f3f4f6' }}>
+      {children}
+    </th>
+  );
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '12px', color: '#6b7280', fontWeight: '500' }}>Date range:</span>
+        {datePresets.map(([m, l]) => (
+          <button key={m} onClick={() => setDateMode(m)} style={dateBtn(dateMode === m)}>{l}</button>
+        ))}
+        {dateMode === 'custom' && (
+          <>
+            <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}
+              style={{ padding: '4px 8px', border: '1px solid #e5e7eb', borderRadius: '5px', fontSize: '12px' }} />
+            <span style={{ color: '#9ca3af', fontSize: '12px' }}>→</span>
+            <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}
+              style={{ padding: '4px 8px', border: '1px solid #e5e7eb', borderRadius: '5px', fontSize: '12px' }} />
+          </>
+        )}
+        {dateBounds.max && (
+          <span style={{ fontSize: '11px', color: '#9ca3af', marginLeft: 'auto' }}>
+            Data range: {fmtDate(dateBounds.min)} → {fmtDate(dateBounds.max)}
+            {' · '}{filteredData.length} of {data.length} rows
+          </span>
+        )}
+        {onOpenFields && (
+          <button onClick={onOpenFields} style={{ padding: '5px 12px', border: '1px solid #e5e7eb', borderRadius: '5px', background: '#fff', color: '#374151', fontSize: '12px', cursor: 'pointer' }}>
+            View Detected Fields
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+        <KPI label="Total Spend" value={fmtHKD(totalSpend)} />
+        <KPI label="Impressions" value={fmt(totalImpressions)} />
+        <KPI label="Avg CTR" value={`${avgCTR.toFixed(2)}%`} />
+        <KPI label="Avg CPA" value={fmtHKD(avgCPA)}
+          badge={crmLoaded ? 'CRM-verified' : 'Pixel-reported'}
+          badgeType={crmLoaded ? 'verified' : 'pixel'} />
+        <KPI
+          label="LTV : CPA"
+          value={aggregateLTVCPA && aggregateLTVCPA > 0 ? `${aggregateLTVCPA.toFixed(1)}x` : '—'}
+          sub={crmLoaded
+            ? (aggregateLTVCPA > 0 ? 'Aggregate revenue ÷ acquisition cost' : 'No matched CRM rows')
+            : 'Upload CRM to unlock'}
+        />
+      </div>
+
+      {(metaSpend > 0 || douyinSpend > 0) && (
+        <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px' }}>
+          <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Spend by Channel</div>
+          <div style={{ display: 'flex', gap: '28px', flexWrap: 'wrap', marginBottom: '10px' }}>
+            {[['Meta', metaSpend, '#1877f2'], ['Douyin', douyinSpend, '#ff0050']].filter(([, v]) => v > 0).map(([name, val, color]) => (
+              <div key={name}>
+                <div style={{ fontSize: '11px', color: '#6b7280' }}>{name}</div>
+                <div style={{ fontWeight: '600', fontSize: '15px' }}>{fmtHKD(val)}</div>
+                <div style={{ fontSize: '11px', color: '#9ca3af' }}>{totalSpend > 0 ? ((val / totalSpend) * 100).toFixed(0) : 0}%</div>
+              </div>
+            ))}
+          </div>
+          {metaSpend > 0 && douyinSpend > 0 && (
+            <div style={{ height: '5px', borderRadius: '3px', background: '#e5e7eb', overflow: 'hidden', display: 'flex' }}>
+              <div style={{ width: `${(metaSpend / totalSpend) * 100}%`, background: '#1877f2' }} />
+              <div style={{ flex: 1, background: '#ff0050' }} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', overflowX: 'auto' }}>
+        <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Campaign Performance</div>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+          <thead>
+            <tr>
+              <TH>Campaign</TH>
+              <TH right>Channel</TH>
+              <TH right>Spend</TH>
+              <TH right>Impressions</TH>
+              <TH right>CTR</TH>
+              <TH right>CPA</TH>
+              <TH right>LTV : CPA</TH>
+            </tr>
+          </thead>
+          <tbody>
+            {campaigns.map((c, i) => (
+              <tr key={i} style={{ borderBottom: '1px solid #f9fafb', cursor: 'pointer' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#f9fafb'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                <td style={{ padding: '9px 10px' }}>
+                  <button onClick={() => setDrill(drill === c.campaign_name ? null : c.campaign_name)}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb', fontSize: '13px', padding: 0, textAlign: 'left' }}>
+                    {c.campaign_name}
+                  </button>
+                </td>
+                <td style={{ textAlign: 'right', padding: '9px 10px', color: '#6b7280', fontSize: '12px' }}>{c.platform}</td>
+                <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {c.spend?.toFixed(0)}</td>
+                <td style={{ textAlign: 'right', padding: '9px 10px' }}>{c.impressions?.toLocaleString()}</td>
+                <td style={{ textAlign: 'right', padding: '9px 10px' }}>{c.ctr?.toFixed(2)}%</td>
+                <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {c.cpa?.toFixed(2)}</td>
+                <td style={{ textAlign: 'right', padding: '9px 10px' }}>
+                  {ltvByAdSet
+                    ? (() => {
+                        const adSets = filteredData.filter(r => r.campaign_name === c.campaign_name)
+                          .map(r => r.ad_set_name).filter((v, i, a) => a.indexOf(v) === i);
+                        const vals = adSets.map(k => ltvByAdSet[k]).filter(v => v > 0);
+                        const ratio = vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
+                        return ratio > 0
+                          ? <span style={{ fontWeight: '600', color: ratio >= 1 ? '#059669' : '#dc2626' }}>{ratio.toFixed(1)}x</span>
+                          : <span style={{ color: '#9ca3af' }}>—</span>;
+                      })()
+                    : <span title="Upload CRM data in Customer Value tab to unlock" style={{ color: '#9ca3af', cursor: 'help', borderBottom: '1px dashed #d1d5db' }}>—</span>
+                  }
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {drill && drillData && (
+          <div style={{ marginTop: '14px', padding: '12px 14px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: '12px', fontWeight: '600', marginBottom: '8px', color: '#374151' }}>Ad Sets — {drill}</div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
+                  {['Ad Set', 'Spend', 'Impressions', 'CTR', 'CPA'].map((h, i) => (
+                    <th key={h} style={{ textAlign: i === 0 ? 'left' : 'right', padding: '6px 8px', color: '#6b7280', fontWeight: '600' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {drillData.map((a, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                    <td style={{ padding: '6px 8px' }}>{a.ad_set_name}</td>
+                    <td style={{ textAlign: 'right', padding: '6px 8px' }}>HKD {a.spend?.toFixed(0)}</td>
+                    <td style={{ textAlign: 'right', padding: '6px 8px' }}>{a.impressions?.toLocaleString()}</td>
+                    <td style={{ textAlign: 'right', padding: '6px 8px' }}>{a.ctr?.toFixed(2)}%</td>
+                    <td style={{ textAlign: 'right', padding: '6px 8px' }}>HKD {a.cpa?.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── CRM PREVIEW TABLE ─────────────────────────────────────────────────────────
+
+function CRMPreviewTable({ rows }) {
+  const all = rows || [];
+  const headers = all.length > 0 ? Object.keys(all[0]).map(h => h.toLowerCase()) : [];
+
+  const [q, setQ] = useState('');
+  const [statusF, setStatusF] = useState('all');
+  const [planF, setPlanF] = useState('all');
+
+  const statusOptions = useMemo(() => [...new Set(all.map(r => r.status).filter(Boolean))].sort(), [all]);
+  const planOptions = useMemo(() => [...new Set(all.map(r => r.plan_type).filter(Boolean))].sort(), [all]);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return all.filter(r => {
+      if (statusF !== 'all' && r.status !== statusF) return false;
+      if (planF !== 'all' && r.plan_type !== planF) return false;
+      if (needle) {
+        const hay = `${r.customer_id || ''} ${r.campaign_name || ''} ${r.ad_set_name || ''}`.toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+  }, [all, q, statusF, planF]);
+
+  const hasFilter = q.trim() !== '' || statusF !== 'all' || planF !== 'all';
+  const ctrlStyle = { background: '#fff', border: '1px solid #e5e7eb', borderRadius: '5px', color: '#374151', padding: '6px 10px', fontSize: '12px', fontFamily: 'inherit' };
+
+  return (
+    <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px', border: '1px solid #f1f5f9' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
+        <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          CRM Data {all.length > 0
+            ? (hasFilter ? `(${filtered.length.toLocaleString()} of ${all.length.toLocaleString()} rows)` : `(${all.length.toLocaleString()} rows)`)
+            : '(no data)'}
+        </div>
+        {all.length > 0 && (
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <input
+              style={{ ...ctrlStyle, minWidth: '220px' }}
+              placeholder="Search customer / campaign / ad set…"
+              value={q}
+              onChange={e => setQ(e.target.value)}
+            />
+            <select style={ctrlStyle} value={statusF} onChange={e => setStatusF(e.target.value)}>
+              <option value="all">All statuses</option>
+              {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select style={ctrlStyle} value={planF} onChange={e => setPlanF(e.target.value)}>
+              <option value="all">All plans</option>
+              {planOptions.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            {hasFilter && (
+              <button
+                onClick={() => { setQ(''); setStatusF('all'); setPlanF('all'); }}
+                style={{ ...ctrlStyle, color: '#6b7280', cursor: 'pointer' }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div style={{ overflow: 'auto', maxHeight: '60vh', border: '1px solid #f3f4f6', borderRadius: '4px' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+          <thead style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1, boxShadow: 'inset 0 -2px 0 #f3f4f6' }}>
+            <tr>
+              {CRM_SCHEMA.map(col => (
+                <th key={col.name} style={{ textAlign: 'left', padding: '8px 10px', whiteSpace: 'nowrap', background: '#fff' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', color: '#374151', fontWeight: '600', fontSize: '11px' }}>
+                    <span>{col.name}</span>
+                    <InfoTip text={col.desc} />
+                  </div>
+                  <div style={{ fontSize: '10px', color: col.required ? '#dc2626' : '#9ca3af', fontWeight: '400', marginTop: '2px' }}>
+                    {col.required ? 'required' : 'optional'}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {all.length === 0 ? (
+              <tr>
+                <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
+                  Click "Fetch from Supabase" above to load customer data.
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
+              <tr>
+                <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
+                  No rows match the current filters.
+                </td>
+              </tr>
+            ) : (
+              filtered.map((row, i) => {
+                const lcRow = {};
+                Object.keys(row).forEach(k => { lcRow[k.toLowerCase()] = row[k]; });
+                return (
+                  <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
+                    {CRM_SCHEMA.map(col => {
+                      const val = lcRow[col.name];
+                      const present = headers.includes(col.name);
+                      return (
+                        <td key={col.name} style={{ padding: '7px 10px', whiteSpace: 'nowrap', color: present ? '#111827' : '#d1d5db' }}>
+                          {present ? (val !== undefined && val !== '' && val !== null ? val : <span style={{ color: '#d1d5db' }}>—</span>) : <span style={{ color: '#d1d5db' }}>not provided</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── CUSTOMER TAB ──────────────────────────────────────────────────────────────
+
+function CustomerTab({ crmResult, loading, lastFetch, campaignData, onFetch }) {
+  const leaderboard = useMemo(
+    () => (crmResult && !crmResult.error) ? buildLeaderboard(crmResult.rows, campaignData) : [],
+    [crmResult, campaignData]
+  );
+  const planMix = useMemo(
+    () => (crmResult && !crmResult.error) ? buildPlanMix(crmResult.rows) : [],
+    [crmResult]
+  );
+
+  const previewRows = crmResult && !crmResult.error ? crmResult.rows : null;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: '8px', marginBottom: '14px' }}>
+        <div>
+          <div style={{ color: '#374151', fontWeight: '500', fontSize: '13px' }}>Customer data · Supabase</div>
+          <div style={{ color: '#9ca3af', fontSize: '12px', marginTop: '2px' }}>
+            Source: <code>v_customer_360</code> on <code>mlsjehglsotapwvalbor</code>
+            {lastFetch && <span style={{ marginLeft: '8px' }}>· last fetched {lastFetch.toLocaleTimeString()}</span>}
+          </div>
+        </div>
+        <button
+          onClick={onFetch}
+          disabled={loading}
+          style={{ background: loading ? '#93c5fd' : '#1e40af', color: '#fff', border: 'none', borderRadius: '5px', padding: '8px 16px', fontSize: '12px', fontWeight: '600', cursor: loading ? 'not-allowed' : 'pointer' }}>
+          {loading ? 'Fetching…' : (crmResult ? '↻ Refresh' : 'Fetch from Supabase')}
+        </button>
+      </div>
+
+      {crmResult && !crmResult.error && (
+        <>
+          {crmResult.warnings && crmResult.warnings.map((w, i) => <Banner key={i} type="warning" message={w} />)}
+
+          {crmResult.joinRate && (
+            <div style={{ background: '#fff', borderRadius: '8px', padding: '14px 16px', marginBottom: '14px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <span style={{ fontWeight: '600', fontSize: '13px' }}>
+                  Joined {crmResult.joinRate.joined}/{crmResult.joinRate.total} customers ({crmResult.joinRate.total > 0 ? ((crmResult.joinRate.joined / crmResult.joinRate.total) * 100).toFixed(0) : 0}%)
+                </span>
+                {crmResult.joinRate.unmatched > 0 && (
+                  <span style={{ fontSize: '12px', color: '#6b7280' }}>{crmResult.joinRate.unmatched} unmatched — likely attribution gaps</span>
+                )}
+              </div>
+              <div style={{ height: '5px', borderRadius: '3px', background: '#e5e7eb', overflow: 'hidden' }}>
+                <div style={{ width: `${crmResult.joinRate.total > 0 ? (crmResult.joinRate.joined / crmResult.joinRate.total) * 100 : 0}%`, height: '100%', background: '#10b981' }} />
+              </div>
+            </div>
+          )}
+
+          <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', overflowX: 'auto', marginBottom: '14px' }}>
+            <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>LTV : CPA Leaderboard</div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead>
+                <tr>
+                  {[['Ad Set', false], ['Customers', true], ['Avg ARPU', true], ['Avg Revenue', true], ['CPA', true], ['LTV : CPA', true]].map(([h, r]) => (
+                    <th key={h} style={{ textAlign: r ? 'right' : 'left', padding: '8px 10px', color: '#6b7280', fontWeight: '600', fontSize: '12px', borderBottom: '2px solid #f3f4f6' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {leaderboard.map((r, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
+                    <td style={{ padding: '9px 10px' }}>{r.ad_set_name}</td>
+                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>{r.count}</td>
+                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {r.avgARPU.toFixed(0)}</td>
+                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {r.avgRevenue.toFixed(0)}</td>
+                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {r.cpa.toFixed(0)}</td>
+                    <td style={{ textAlign: 'right', padding: '9px 10px', fontWeight: '600', color: r.ltvCpa >= 1 ? '#059669' : '#dc2626' }}>
+                      {r.ltvCpa > 0 ? `${r.ltvCpa.toFixed(1)}x` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {planMix.length > 0 && (
+            <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px' }}>
+              <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Plan Mix</div>
+              <Donut data={planMix} />
+            </div>
+          )}
+
+          <CRMPreviewTable rows={previewRows} />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── MAIN DASHBOARD ────────────────────────────────────────────────────────────
+
+function Dashboard() {
+  const [campaignFiles, setCampaignFiles] = useState([]);
+  const [committedFiles, setCommittedFiles] = useState([]);
+  const [crmResult, setCrmResult] = useState(null);
+  const [loadingCRM, setLoadingCRM] = useState(false);
+  const [lastCrmFetch, setLastCrmFetch] = useState(null);
+  const [tab, setTab] = useState('campaigns');
+  const [loading, setLoading] = useState(false);
+  const [banners, setBanners] = useState([]);
+  const [aliasesLoaded, setAliasesLoaded] = useState(false);
+
+  // Try to fetch the external alias dictionary on mount; fall back silently to defaults.
+  useEffect(() => {
+    fetch('./column_aliases.json', { cache: 'no-cache' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && (data.meta || data.douyin)) {
+          ALIASES = {
+            meta:   { ...DEFAULT_ALIASES.meta,   ...(data.meta   || {}) },
+            douyin: { ...DEFAULT_ALIASES.douyin, ...(data.douyin || {}) },
+          };
+          setAliasesLoaded(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const campaignData = useMemo(() => committedFiles.flatMap(f => f.rows), [committedFiles]);
+
+  const hasCampaignPending = useMemo(() => {
+    if (campaignFiles.length !== committedFiles.length) return true;
+    const cByName = Object.fromEntries(committedFiles.map(f => [f.name, f]));
+    return campaignFiles.some(f => cByName[f.name] !== f);
+  }, [campaignFiles, committedFiles]);
+
+  const ltvByAdSet = useMemo(() => {
+    if (!crmResult || crmResult.error) return null;
+    const board = buildLeaderboard(crmResult.rows, campaignData);
+    const map = {};
+    board.forEach(r => { if (r.ltvCpa > 0) map[r.ad_set_name] = r.ltvCpa; });
+    return map;
+  }, [crmResult, campaignData]);
+
+  // Aggregate LTV:CPA across all CRM customers — total revenue ÷ total acquisition cost.
+  // Uses CRM-reported acquisition_cost when present, else the platform-reported per-ad-set CPA.
+  const aggregateLTVCPA = useMemo(() => {
+    if (!crmResult || crmResult.error) return 0;
+    const platformCPA = {};
+    aggByKey(campaignData, 'ad_set_name').forEach(r => { platformCPA[r.ad_set_name] = r.cpa; });
+    let totalRev = 0, totalCost = 0;
+    crmResult.rows.forEach(r => {
+      totalRev += num(r.realized_revenue_hkd);
+      const acq = num(r.acquisition_cost);
+      const cost = acq > 0 ? acq : (platformCPA[r.ad_set_name] || 0);
+      totalCost += cost;
+    });
+    return totalCost > 0 ? totalRev / totalCost : 0;
+  }, [crmResult, campaignData]);
+
+  const pushBanner = useCallback((type, message) => {
+    const id = Date.now() + Math.random();
+    setBanners(prev => [...prev, { id, type, message }]);
+    setTimeout(() => setBanners(prev => prev.filter(b => b.id !== id)), 7000);
+  }, []);
+
+  const buildFileMeta = (file, fieldMap, normalized) => ({
+    ...file,
+    fieldMap,
+    rows: normalized.rows,
+    rowCount: normalized.rows.length,
+    campaignCount: new Set(normalized.rows.map(r => r.campaign_name)).size,
+    warnings: normalized.warnings,
+  });
+
+  const handleCampaignFiles = useCallback(async (fileList) => {
+    setLoading(true);
+    const incoming = [];
+    const fileWarnings = [];
+
+    for (const file of Array.from(fileList)) {
+      try {
+        const text = await file.text();
+        const { headers, rows: rawRows } = parseCSV(text);
+        if (rawRows.length === 0) { fileWarnings.push(`${file.name}: empty file, skipped`); continue; }
+
+        const platform = detectPlatform(headers);
+        if (!platform || platform === 'crm') { fileWarnings.push(`${file.name}: unrecognised format — skipped`); continue; }
+
+        const autoMap = detectFields(headers, platform);
+        const saved = loadOverride(platform, headers);
+        const fieldMap = saved ? { ...autoMap, ...saved } : autoMap;
+        const normalized = normaliseRows(rawRows, fieldMap, platform);
+
+        incoming.push({
+          name: file.name,
+          platform: platform === 'meta' ? 'Meta' : 'Douyin',
+          platformKey: platform,
+          rowCount: normalized.rows.length,
+          campaignCount: new Set(normalized.rows.map(r => r.campaign_name)).size,
+          warnings: normalized.warnings,
+          rows: normalized.rows,
+          headers,
+          rawRows,
+          fieldMap,
+          savedMapping: !!saved,
+        });
+        normalized.warnings.forEach(w => fileWarnings.push(`${file.name}: ${w}`));
+      } catch (e) {
+        fileWarnings.push(`${file.name}: failed to read — ${e.message}`);
+      }
+    }
+
+    setCampaignFiles(prev => {
+      const incomingNames = new Set(incoming.map(f => f.name));
+      const kept = prev.filter(f => !incomingNames.has(f.name));
+      return [...kept, ...incoming];
+    });
+
+    fileWarnings.forEach(w => pushBanner('warning', w));
+    if (incoming.length > 0) {
+      pushBanner('info', `${incoming.length} file${incoming.length > 1 ? 's' : ''} ready. Click Update to apply.`);
+    }
+    setLoading(false);
+  }, [pushBanner]);
+
+  const handleRemoveFile = useCallback(name => {
+    setCampaignFiles(prev => prev.filter(f => f.name !== name));
+    setCommittedFiles(prev => prev.filter(f => f.name !== name));
+  }, []);
+
+  const handleUpdateCampaigns = useCallback(() => {
+    setCommittedFiles(campaignFiles);
+    pushBanner('success', `Applied ${campaignFiles.length} file${campaignFiles.length === 1 ? '' : 's'}. ${campaignFiles.reduce((s, f) => s + f.rowCount, 0)} rows in dashboard.`);
+  }, [campaignFiles, pushBanner]);
+
+  const handleMappingChange = useCallback((fileName, field, newHeader) => {
+    setCampaignFiles(prev => prev.map(f => {
+      if (f.name !== fileName) return f;
+      const fieldMap = { ...f.fieldMap, [field]: newHeader };
+      saveOverride(f.platformKey, f.headers, fieldMap);
+      const normalized = normaliseRows(f.rawRows, fieldMap, f.platformKey);
+      return { ...buildFileMeta(f, fieldMap, normalized), savedMapping: true };
+    }));
+  }, []);
+
+  const handleResetMapping = useCallback(fileName => {
+    setCampaignFiles(prev => prev.map(f => {
+      if (f.name !== fileName) return f;
+      try { localStorage.removeItem(overrideKey(f.platformKey, f.headers)); } catch (e) {}
+      const fieldMap = detectFields(f.headers, f.platformKey);
+      const normalized = normaliseRows(f.rawRows, fieldMap, f.platformKey);
+      return { ...buildFileMeta(f, fieldMap, normalized), savedMapping: false };
+    }));
+    pushBanner('info', `Reset saved mapping for ${fileName}.`);
+  }, [pushBanner]);
+
+  const handleFetchSupabase = useCallback(async () => {
+    setLoadingCRM(true);
+    try {
+      const { data, error } = await sb
+        .from('v_customer_360')
+        .select(SUPABASE_SELECT_FIELDS.join(','));
+      if (error) throw error;
+      // Map Supabase columns to the legacy CRM-CSV column names so that
+      // processCRM / buildLeaderboard / buildPlanMix continue to work unchanged.
+      const renamed = (data || []).map(r => ({
+        ...r,
+        customer_id: r.external_customer_id,
+        tenure_months: r.months_active,
+      }));
+      const result = processCRM(renamed, campaignData);
+      if (result.error) { pushBanner('error', result.error); return; }
+      setCrmResult({ ...result, name: 'Supabase v_customer_360' });
+      setLastCrmFetch(new Date());
+      pushBanner(
+        'success',
+        `Fetched ${renamed.length} customers from Supabase. ${result.joinRate.joined}/${result.joinRate.total} matched ad sets.`,
+      );
+    } catch (e) {
+      pushBanner('error', `Supabase fetch failed: ${e.message || e}`);
+    } finally {
+      setLoadingCRM(false);
+    }
+  }, [campaignData, pushBanner]);
+
+  const handleReset = () => {
+    if (!confirm('Clear all loaded data and start over?')) return;
+    setCampaignFiles([]);
+    setCommittedFiles([]);
+    setCrmResult(null);
+    setLastCrmFetch(null);
+    setTab('campaigns');
+    setBanners([]);
+  };
+
+  const tabStyle = active => ({
+    padding: '8px 18px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500',
+    background: active ? '#1e40af' : 'transparent',
+    color: active ? '#fff' : '#6b7280',
+    transition: 'all 0.15s',
+  });
+
+  return (
+    <div style={{ padding: '24px', maxWidth: '1400px', margin: '0 auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+        <div>
+          <div style={{ fontSize: '18px', fontWeight: '700', color: '#111827' }}>HK Telco Ads Dashboard</div>
+          <div style={{ fontSize: '12px', color: '#9ca3af', marginTop: '2px' }}>
+            Meta and Douyin campaign analysis
+            {aliasesLoaded && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#10b981' }}>· custom column_aliases.json loaded</span>}
+          </div>
+        </div>
+        {(campaignFiles.length > 0 || crmResult) && (
+          <button onClick={handleReset} style={{ background: 'none', border: '1px solid #e5e7eb', borderRadius: '6px', padding: '6px 14px', fontSize: '12px', color: '#6b7280', cursor: 'pointer' }}>
+            Reset
+          </button>
+        )}
+      </div>
+
+      {banners.map(b => <Banner key={b.id} type={b.type} message={b.message} onDismiss={() => setBanners(prev => prev.filter(x => x.id !== b.id))} />)}
+
+      <div style={{ display: 'flex', gap: '2px', marginBottom: '20px', background: '#f3f4f6', padding: '4px', borderRadius: '8px', width: 'fit-content' }}>
+        <button onClick={() => setTab('campaigns')} style={tabStyle(tab === 'campaigns')}>Campaign Performance</button>
+        <button onClick={() => setTab('customers')} style={tabStyle(tab === 'customers')}>Customer Value</button>
+        <button onClick={() => setTab('fields')} style={tabStyle(tab === 'fields')}>
+          Detected Fields{campaignFiles.length > 0 ? ` (${campaignFiles.length})` : ''}
+        </button>
+      </div>
+
+      {tab === 'campaigns' && (
+        <>
+          <IngestZone
+            files={campaignFiles}
+            onFiles={handleCampaignFiles}
+            onRemoveFile={handleRemoveFile}
+            loading={loading}
+            title="Upload CSV files"
+            hint="Drop Meta or Douyin exports here or click to browse — multiple files supported"
+          />
+
+          {hasCampaignPending && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', background: '#eff6ff', color: '#1e40af', borderRadius: '6px', marginBottom: '14px', fontSize: '13px' }}>
+              <span>
+                {campaignFiles.length} file{campaignFiles.length === 1 ? '' : 's'} pending
+                {' · '}
+                {campaignFiles.reduce((s, f) => s + f.rowCount, 0)} rows. Click Update to apply.
+              </span>
+              <button onClick={handleUpdateCampaigns} style={{ background: '#1e40af', color: '#fff', border: 'none', borderRadius: '5px', padding: '6px 14px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
+                Update
+              </button>
+            </div>
+          )}
+
+          {campaignData.length === 0
+            ? (
+              <div style={{ textAlign: 'center', padding: '50px 20px', color: '#9ca3af' }}>
+                <div style={{ fontSize: '15px', fontWeight: '500', color: '#6b7280', marginBottom: '6px' }}>No data applied</div>
+                <div style={{ fontSize: '13px' }}>
+                  {campaignFiles.length === 0
+                    ? 'Upload Meta or Douyin CSV exports above to get started'
+                    : 'Click Update above to apply uploaded files to the dashboard'}
+                </div>
+              </div>
+            )
+            : <CampaignTab
+                data={campaignData}
+                crmLoaded={!!crmResult && !crmResult.error}
+                ltvByAdSet={ltvByAdSet}
+                aggregateLTVCPA={aggregateLTVCPA}
+                onOpenFields={() => setTab('fields')}
+              />
+          }
+        </>
+      )}
+
+      {tab === 'customers' && (
+        <CustomerTab
+          crmResult={crmResult}
+          loading={loadingCRM}
+          lastFetch={lastCrmFetch}
+          campaignData={campaignData}
+          onFetch={handleFetchSupabase}
+        />
+      )}
+
+      {tab === 'fields' && (
+        campaignFiles.length === 0
+          ? (
+            <div style={{ textAlign: 'center', padding: '50px 20px', color: '#9ca3af' }}>
+              <div style={{ fontSize: '15px', fontWeight: '500', color: '#6b7280', marginBottom: '6px' }}>No files uploaded</div>
+              <div style={{ fontSize: '13px' }}>Upload Meta or Douyin CSV exports on the Campaign Performance tab to inspect detected fields here.</div>
+            </div>
+          )
+          : <FieldPreview
+              files={campaignFiles}
+              onMappingChange={handleMappingChange}
+              onResetMapping={handleResetMapping}
+            />
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<Dashboard />);
