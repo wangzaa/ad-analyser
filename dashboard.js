@@ -1,5 +1,23 @@
 const { useState, useCallback, useRef, useMemo, useEffect } = React;
 
+// ── SUPABASE ──────────────────────────────────────────────────────────────────
+
+const SUPABASE_URL = "https://mlsjehglsotapwvalbor.supabase.co";
+const SUPABASE_KEY = "sb_publishable_NLslAfmD7P0Nfu3MJXjSow_4Ole91rH";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const SUPABASE_SELECT_FIELDS = [
+  "external_customer_id",
+  "campaign_name",
+  "ad_set_name",
+  "plan_type",
+  "monthly_arpu_hkd",
+  "status",
+  "realized_revenue_hkd",
+  "projected_ltv_24mo_hkd",
+  "months_active",
+];
+
 // ── UTILS ─────────────────────────────────────────────────────────────────────
 
 const num = s => { const m = String(s).match(/[\d.]+/); return m ? parseFloat(m[0]) : 0; };
@@ -203,7 +221,6 @@ const CRM_SCHEMA = [
   { name: 'monthly_arpu_hkd',     required: true,  desc: 'Monthly average revenue per user, in HKD. Used to compute long-term value.' },
   { name: 'status',               required: true,  desc: 'Customer state: active, churned, or pending. Used for retention/cohort analysis.' },
   { name: 'realized_revenue_hkd', required: true,  desc: 'Total revenue realised since acquisition, in HKD. Numerator of LTV:CPA.' },
-  { name: 'acquisition_cost',     required: false, desc: 'CRM-verified acquisition cost in HKD. If absent, platform-reported CPA is used.' },
   { name: 'plan_type',            required: false, desc: 'Plan SKU (e.g., 5G_Family_500GB). Drives the Plan Mix donut.' },
   { name: 'tenure_months',        required: false, desc: 'Months since signup. Used for cohort retention curves.' },
 ];
@@ -691,69 +708,126 @@ function CampaignTab({ data, crmLoaded, ltvByAdSet, aggregateLTVCPA, onOpenField
 // ── CRM PREVIEW TABLE ─────────────────────────────────────────────────────────
 
 function CRMPreviewTable({ rows }) {
-  const sample = (rows || []).slice(0, 8);
-  const headers = rows && rows.length > 0 ? Object.keys(rows[0]).map(h => h.toLowerCase()) : [];
+  const all = rows || [];
+  const headers = all.length > 0 ? Object.keys(all[0]).map(h => h.toLowerCase()) : [];
+
+  const [q, setQ] = useState('');
+  const [statusF, setStatusF] = useState('all');
+  const [planF, setPlanF] = useState('all');
+
+  const statusOptions = useMemo(() => [...new Set(all.map(r => r.status).filter(Boolean))].sort(), [all]);
+  const planOptions = useMemo(() => [...new Set(all.map(r => r.plan_type).filter(Boolean))].sort(), [all]);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return all.filter(r => {
+      if (statusF !== 'all' && r.status !== statusF) return false;
+      if (planF !== 'all' && r.plan_type !== planF) return false;
+      if (needle) {
+        const hay = `${r.customer_id || ''} ${r.campaign_name || ''} ${r.ad_set_name || ''}`.toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+  }, [all, q, statusF, planF]);
+
+  const hasFilter = q.trim() !== '' || statusF !== 'all' || planF !== 'all';
+  const ctrlStyle = { background: '#fff', border: '1px solid #e5e7eb', borderRadius: '5px', color: '#374151', padding: '6px 10px', fontSize: '12px', fontFamily: 'inherit' };
 
   return (
-    <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px', border: '1px solid #f1f5f9', overflowX: 'auto' }}>
-      <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        CRM Data Preview {sample.length > 0 ? `(showing ${sample.length} of ${rows.length})` : '(no data uploaded)'}
+    <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px', border: '1px solid #f1f5f9' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
+        <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          CRM Data {all.length > 0
+            ? (hasFilter ? `(${filtered.length.toLocaleString()} of ${all.length.toLocaleString()} rows)` : `(${all.length.toLocaleString()} rows)`)
+            : '(no data)'}
+        </div>
+        {all.length > 0 && (
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <input
+              style={{ ...ctrlStyle, minWidth: '220px' }}
+              placeholder="Search customer / campaign / ad set…"
+              value={q}
+              onChange={e => setQ(e.target.value)}
+            />
+            <select style={ctrlStyle} value={statusF} onChange={e => setStatusF(e.target.value)}>
+              <option value="all">All statuses</option>
+              {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select style={ctrlStyle} value={planF} onChange={e => setPlanF(e.target.value)}>
+              <option value="all">All plans</option>
+              {planOptions.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            {hasFilter && (
+              <button
+                onClick={() => { setQ(''); setStatusF('all'); setPlanF('all'); }}
+                style={{ ...ctrlStyle, color: '#6b7280', cursor: 'pointer' }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
       </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-        <thead>
-          <tr>
-            {CRM_SCHEMA.map(col => (
-              <th key={col.name} style={{ textAlign: 'left', padding: '8px 10px', borderBottom: '2px solid #f3f4f6', whiteSpace: 'nowrap' }}>
-                <div style={{ display: 'flex', alignItems: 'center', color: '#374151', fontWeight: '600', fontSize: '11px' }}>
-                  <span>{col.name}</span>
-                  <InfoTip text={col.desc} />
-                </div>
-                <div style={{ fontSize: '10px', color: col.required ? '#dc2626' : '#9ca3af', fontWeight: '400', marginTop: '2px' }}>
-                  {col.required ? 'required' : 'optional'}
-                </div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {sample.length === 0 ? (
+      <div style={{ overflow: 'auto', maxHeight: '60vh', border: '1px solid #f3f4f6', borderRadius: '4px' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+          <thead style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1, boxShadow: 'inset 0 -2px 0 #f3f4f6' }}>
             <tr>
-              <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
-                Upload a CRM CSV above to populate this preview.
-              </td>
+              {CRM_SCHEMA.map(col => (
+                <th key={col.name} style={{ textAlign: 'left', padding: '8px 10px', whiteSpace: 'nowrap', background: '#fff' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', color: '#374151', fontWeight: '600', fontSize: '11px' }}>
+                    <span>{col.name}</span>
+                    <InfoTip text={col.desc} />
+                  </div>
+                  <div style={{ fontSize: '10px', color: col.required ? '#dc2626' : '#9ca3af', fontWeight: '400', marginTop: '2px' }}>
+                    {col.required ? 'required' : 'optional'}
+                  </div>
+                </th>
+              ))}
             </tr>
-          ) : (
-            sample.map((row, i) => {
-              const lcRow = {};
-              Object.keys(row).forEach(k => { lcRow[k.toLowerCase()] = row[k]; });
-              return (
-                <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
-                  {CRM_SCHEMA.map(col => {
-                    const val = lcRow[col.name];
-                    const present = headers.includes(col.name);
-                    return (
-                      <td key={col.name} style={{ padding: '7px 10px', whiteSpace: 'nowrap', color: present ? '#111827' : '#d1d5db' }}>
-                        {present ? (val !== undefined && val !== '' ? val : <span style={{ color: '#d1d5db' }}>—</span>) : <span style={{ color: '#d1d5db' }}>not provided</span>}
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {all.length === 0 ? (
+              <tr>
+                <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
+                  Click "Fetch from Supabase" above to load customer data.
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
+              <tr>
+                <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
+                  No rows match the current filters.
+                </td>
+              </tr>
+            ) : (
+              filtered.map((row, i) => {
+                const lcRow = {};
+                Object.keys(row).forEach(k => { lcRow[k.toLowerCase()] = row[k]; });
+                return (
+                  <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
+                    {CRM_SCHEMA.map(col => {
+                      const val = lcRow[col.name];
+                      const present = headers.includes(col.name);
+                      return (
+                        <td key={col.name} style={{ padding: '7px 10px', whiteSpace: 'nowrap', color: present ? '#111827' : '#d1d5db' }}>
+                          {present ? (val !== undefined && val !== '' && val !== null ? val : <span style={{ color: '#d1d5db' }}>—</span>) : <span style={{ color: '#d1d5db' }}>not provided</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 // ── CUSTOMER TAB ──────────────────────────────────────────────────────────────
 
-function CustomerTab({ crmResult, pendingCRM, campaignData, onCRMFile, onUpdateCRM, onClearCRM }) {
-  const [dragging, setDragging] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const inputRef = useRef(null);
-
+function CustomerTab({ crmResult, loading, lastFetch, campaignData, onFetch }) {
   const leaderboard = useMemo(
     () => (crmResult && !crmResult.error) ? buildLeaderboard(crmResult.rows, campaignData) : [],
     [crmResult, campaignData]
@@ -763,53 +837,25 @@ function CustomerTab({ crmResult, pendingCRM, campaignData, onCRMFile, onUpdateC
     [crmResult]
   );
 
-  const handleFile = useCallback(async fileList => {
-    const f = Array.from(fileList).find(f => f.name.toLowerCase().endsWith('.csv'));
-    if (!f) return;
-    setLoading(true);
-    await onCRMFile(f);
-    setLoading(false);
-  }, [onCRMFile]);
-
-  const previewRows = pendingCRM && !pendingCRM.error ? pendingCRM.rows
-    : crmResult && !crmResult.error ? crmResult.rows
-    : null;
-
-  const hasPending = !!pendingCRM && pendingCRM !== crmResult;
+  const previewRows = crmResult && !crmResult.error ? crmResult.rows : null;
 
   return (
     <div>
-      <div
-        onDragOver={e => { e.preventDefault(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files); }}
-        onClick={() => inputRef.current?.click()}
-        style={{ padding: '24px', border: dragging ? '2px solid #7c3aed' : '2px dashed #d1d5db', borderRadius: '8px', cursor: 'pointer', background: dragging ? '#f5f3ff' : '#fafafa', textAlign: 'center', transition: 'all 0.15s', marginBottom: '14px' }}>
-        {loading ? <div style={{ color: '#6b7280' }}>Reading...</div> :
-          <>
-            <div style={{ color: '#374151', fontWeight: '500' }}>Upload CRM related data</div>
-            <div style={{ color: '#9ca3af', fontSize: '12px', marginTop: '4px' }}>
-              Drop a CSV here or click to upload. Required columns are listed in the preview below.
-            </div>
-          </>
-        }
-        <input ref={inputRef} type="file" accept=".csv" onChange={e => { handleFile(e.target.files); e.target.value = ''; }} style={{ display: 'none' }} />
-      </div>
-
-      {pendingCRM && pendingCRM.error && <Banner type="error" message={pendingCRM.error} />}
-      {hasPending && !pendingCRM.error && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', background: '#eff6ff', color: '#1e40af', borderRadius: '6px', marginBottom: '14px', fontSize: '13px' }}>
-          <span>CRM file ready ({pendingCRM.rows.length} rows). Click Update to apply.</span>
-          <button onClick={onUpdateCRM} style={{ background: '#1e40af', color: '#fff', border: 'none', borderRadius: '5px', padding: '6px 14px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>
-            Update
-          </button>
-          <button onClick={onClearCRM} style={{ background: 'none', color: '#1e40af', border: '1px solid #c7d2fe', borderRadius: '5px', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}>
-            Discard
-          </button>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: '#fafafa', border: '1px solid #e5e7eb', borderRadius: '8px', marginBottom: '14px' }}>
+        <div>
+          <div style={{ color: '#374151', fontWeight: '500', fontSize: '13px' }}>Customer data · Supabase</div>
+          <div style={{ color: '#9ca3af', fontSize: '12px', marginTop: '2px' }}>
+            Source: <code>v_customer_360</code> on <code>mlsjehglsotapwvalbor</code>
+            {lastFetch && <span style={{ marginLeft: '8px' }}>· last fetched {lastFetch.toLocaleTimeString()}</span>}
+          </div>
         </div>
-      )}
-
-      <CRMPreviewTable rows={previewRows} />
+        <button
+          onClick={onFetch}
+          disabled={loading}
+          style={{ background: loading ? '#93c5fd' : '#1e40af', color: '#fff', border: 'none', borderRadius: '5px', padding: '8px 16px', fontSize: '12px', fontWeight: '600', cursor: loading ? 'not-allowed' : 'pointer' }}>
+          {loading ? 'Fetching…' : (crmResult ? '↻ Refresh' : 'Fetch from Supabase')}
+        </button>
+      </div>
 
       {crmResult && !crmResult.error && (
         <>
@@ -859,11 +905,13 @@ function CustomerTab({ crmResult, pendingCRM, campaignData, onCRMFile, onUpdateC
           </div>
 
           {planMix.length > 0 && (
-            <div style={{ background: '#fff', borderRadius: '8px', padding: '16px' }}>
+            <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px' }}>
               <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Plan Mix</div>
               <Donut data={planMix} />
             </div>
           )}
+
+          <CRMPreviewTable rows={previewRows} />
         </>
       )}
     </div>
@@ -875,8 +923,9 @@ function CustomerTab({ crmResult, pendingCRM, campaignData, onCRMFile, onUpdateC
 function Dashboard() {
   const [campaignFiles, setCampaignFiles] = useState([]);
   const [committedFiles, setCommittedFiles] = useState([]);
-  const [pendingCRM, setPendingCRM] = useState(null);
   const [crmResult, setCrmResult] = useState(null);
+  const [loadingCRM, setLoadingCRM] = useState(false);
+  const [lastCrmFetch, setLastCrmFetch] = useState(null);
   const [tab, setTab] = useState('campaigns');
   const [loading, setLoading] = useState(false);
   const [banners, setBanners] = useState([]);
@@ -1027,36 +1076,41 @@ function Dashboard() {
     pushBanner('info', `Reset saved mapping for ${fileName}.`);
   }, [pushBanner]);
 
-  const handleCRMFile = useCallback(async (file) => {
+  const handleFetchSupabase = useCallback(async () => {
+    setLoadingCRM(true);
     try {
-      const text = await file.text();
-      const { rows } = parseCSV(text);
-      if (rows.length === 0) { pushBanner('error', `${file.name}: empty file`); return; }
-
-      const result = processCRM(rows, campaignData);
-      if (result.error) { setPendingCRM({ error: result.error, name: file.name }); return; }
-
-      setPendingCRM({ ...result, name: file.name });
-      pushBanner('info', `${file.name} parsed (${result.rows.length} rows). Click Update to apply.`);
+      const { data, error } = await sb
+        .from('v_customer_360')
+        .select(SUPABASE_SELECT_FIELDS.join(','));
+      if (error) throw error;
+      // Map Supabase columns to the legacy CRM-CSV column names so that
+      // processCRM / buildLeaderboard / buildPlanMix continue to work unchanged.
+      const renamed = (data || []).map(r => ({
+        ...r,
+        customer_id: r.external_customer_id,
+        tenure_months: r.months_active,
+      }));
+      const result = processCRM(renamed, campaignData);
+      if (result.error) { pushBanner('error', result.error); return; }
+      setCrmResult({ ...result, name: 'Supabase v_customer_360' });
+      setLastCrmFetch(new Date());
+      pushBanner(
+        'success',
+        `Fetched ${renamed.length} customers from Supabase. ${result.joinRate.joined}/${result.joinRate.total} matched ad sets.`,
+      );
     } catch (e) {
-      pushBanner('error', `${file.name}: failed to read — ${e.message}`);
+      pushBanner('error', `Supabase fetch failed: ${e.message || e}`);
+    } finally {
+      setLoadingCRM(false);
     }
   }, [campaignData, pushBanner]);
-
-  const handleUpdateCRM = useCallback(() => {
-    if (!pendingCRM || pendingCRM.error) return;
-    setCrmResult(pendingCRM);
-    pushBanner('success', `CRM applied. ${pendingCRM.joinRate.joined}/${pendingCRM.joinRate.total} customers matched.`);
-  }, [pendingCRM, pushBanner]);
-
-  const handleClearCRM = useCallback(() => { setPendingCRM(null); }, []);
 
   const handleReset = () => {
     if (!confirm('Clear all loaded data and start over?')) return;
     setCampaignFiles([]);
     setCommittedFiles([]);
-    setPendingCRM(null);
     setCrmResult(null);
+    setLastCrmFetch(null);
     setTab('campaigns');
     setBanners([]);
   };
@@ -1078,7 +1132,7 @@ function Dashboard() {
             {aliasesLoaded && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#10b981' }}>· custom column_aliases.json loaded</span>}
           </div>
         </div>
-        {(campaignFiles.length > 0 || crmResult || pendingCRM) && (
+        {(campaignFiles.length > 0 || crmResult) && (
           <button onClick={handleReset} style={{ background: 'none', border: '1px solid #e5e7eb', borderRadius: '6px', padding: '6px 14px', fontSize: '12px', color: '#6b7280', cursor: 'pointer' }}>
             Reset
           </button>
@@ -1144,11 +1198,10 @@ function Dashboard() {
       {tab === 'customers' && (
         <CustomerTab
           crmResult={crmResult}
-          pendingCRM={pendingCRM}
+          loading={loadingCRM}
+          lastFetch={lastCrmFetch}
           campaignData={campaignData}
-          onCRMFile={handleCRMFile}
-          onUpdateCRM={handleUpdateCRM}
-          onClearCRM={handleClearCRM}
+          onFetch={handleFetchSupabase}
         />
       )}
 
