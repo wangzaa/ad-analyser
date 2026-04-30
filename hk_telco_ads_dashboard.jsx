@@ -1165,11 +1165,22 @@ function Dashboard() {
   const handleFetchSupabase = useCallback(async () => {
     setLoadingCRM(true);
     try {
-      const { data, error } = await sb
-        .from('v_customer_360')
-        .select(SUPABASE_SELECT_FIELDS.join(','))
-        .range(0, 9999);  // Supabase REST default cap is 1000; lift to 10k.
-      if (error) throw error;
+      // Paginated fetch — Supabase's PostgREST max-rows cap (default 1000)
+      // applies even to .range(); we page through it manually.
+      const PAGE_SIZE = 1000;
+      let data = [];
+      for (let page = 0; page < 20; page++) {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+        const { data: pageData, error: pageErr } = await sb
+          .from('v_customer_360')
+          .select(SUPABASE_SELECT_FIELDS.join(','))
+          .range(from, to);
+        if (pageErr) throw pageErr;
+        if (!pageData || pageData.length === 0) break;
+        data = data.concat(pageData);
+        if (pageData.length < PAGE_SIZE) break;
+      }
       // Map Supabase columns to the legacy CRM-CSV column names so that
       // processCRM / buildLeaderboard / buildPlanMix continue to work unchanged.
       const renamed = (data || []).map(r => ({
