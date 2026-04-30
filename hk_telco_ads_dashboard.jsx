@@ -714,6 +714,7 @@ function CRMPreviewTable({ rows }) {
   const [q, setQ] = useState('');
   const [statusF, setStatusF] = useState('all');
   const [planF, setPlanF] = useState('all');
+  const [sort, setSort] = useState({ field: null, dir: 'asc' });
 
   const statusOptions = useMemo(() => [...new Set(all.map(r => r.status).filter(Boolean))].sort(), [all]);
   const planOptions = useMemo(() => [...new Set(all.map(r => r.plan_type).filter(Boolean))].sort(), [all]);
@@ -730,6 +731,35 @@ function CRMPreviewTable({ rows }) {
       return true;
     });
   }, [all, q, statusF, planF]);
+
+  const sorted = useMemo(() => {
+    if (!sort.field) return filtered;
+    const dir = sort.dir === 'asc' ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      const av = a[sort.field], bv = b[sort.field];
+      const aMissing = av == null || av === '';
+      const bMissing = bv == null || bv === '';
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;   // missing values sink to bottom regardless of dir
+      if (bMissing) return -1;
+      const an = parseFloat(av), bn = parseFloat(bv);
+      if (!isNaN(an) && !isNaN(bn) && String(av).match(/^-?\d/) && String(bv).match(/^-?\d/)) {
+        return (an - bn) * dir;
+      }
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }, [filtered, sort]);
+
+  const handleSort = field => {
+    setSort(s => s.field === field
+      ? { field, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+      : { field, dir: 'asc' });
+  };
+
+  const sortIcon = field => {
+    if (sort.field !== field) return <span style={{ color: '#d1d5db', marginLeft: '4px', fontSize: '9px' }}>↕</span>;
+    return <span style={{ color: '#1e40af', marginLeft: '4px', fontSize: '10px' }}>{sort.dir === 'asc' ? '▲' : '▼'}</span>;
+  };
 
   const hasFilter = q.trim() !== '' || statusF !== 'all' || planF !== 'all';
   const ctrlStyle = { background: '#fff', border: '1px solid #e5e7eb', borderRadius: '5px', color: '#374151', padding: '6px 10px', fontSize: '12px', fontFamily: 'inherit' };
@@ -774,13 +804,13 @@ function CRMPreviewTable({ rows }) {
           <thead style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1, boxShadow: 'inset 0 -2px 0 #f3f4f6' }}>
             <tr>
               {CRM_SCHEMA.map(col => (
-                <th key={col.name} style={{ textAlign: 'left', padding: '8px 10px', whiteSpace: 'nowrap', background: '#fff' }}>
+                <th key={col.name} style={{ textAlign: 'left', padding: '8px 10px', whiteSpace: 'nowrap', background: '#fff', cursor: 'pointer', userSelect: 'none' }}
+                    onClick={() => handleSort(col.name)}
+                    title={`Sort by ${col.name}`}>
                   <div style={{ display: 'flex', alignItems: 'center', color: '#374151', fontWeight: '600', fontSize: '11px' }}>
                     <span>{col.name}</span>
+                    {sortIcon(col.name)}
                     <InfoTip text={col.desc} />
-                  </div>
-                  <div style={{ fontSize: '10px', color: col.required ? '#dc2626' : '#9ca3af', fontWeight: '400', marginTop: '2px' }}>
-                    {col.required ? 'required' : 'optional'}
                   </div>
                 </th>
               ))}
@@ -793,14 +823,14 @@ function CRMPreviewTable({ rows }) {
                   Click "Fetch from Supabase" above to load customer data.
                 </td>
               </tr>
-            ) : filtered.length === 0 ? (
+            ) : sorted.length === 0 ? (
               <tr>
                 <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
                   No rows match the current filters.
                 </td>
               </tr>
             ) : (
-              filtered.map((row, i) => {
+              sorted.map((row, i) => {
                 const lcRow = {};
                 Object.keys(row).forEach(k => { lcRow[k.toLowerCase()] = row[k]; });
                 return (
