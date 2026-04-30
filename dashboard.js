@@ -1167,7 +1167,8 @@ function Dashboard() {
     try {
       const { data, error } = await sb
         .from('v_customer_360')
-        .select(SUPABASE_SELECT_FIELDS.join(','));
+        .select(SUPABASE_SELECT_FIELDS.join(','))
+        .range(0, 9999);  // Supabase REST default cap is 1000; lift to 10k.
       if (error) throw error;
       // Map Supabase columns to the legacy CRM-CSV column names so that
       // processCRM / buildLeaderboard / buildPlanMix continue to work unchanged.
