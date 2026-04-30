@@ -16,6 +16,10 @@ const SUPABASE_SELECT_FIELDS = [
   "realized_revenue_hkd",
   "projected_ltv_24mo_hkd",
   "months_active",
+  "segment_code",
+  "brand",
+  "service_type",
+  "acquisition_cost",
 ];
 
 // ── UTILS ─────────────────────────────────────────────────────────────────────
@@ -223,6 +227,10 @@ const CRM_SCHEMA = [
   { name: 'realized_revenue_hkd', required: true,  desc: 'Total revenue realised since acquisition, in HKD. Numerator of LTV:CPA.' },
   { name: 'plan_type',            required: false, desc: 'Plan SKU (e.g., 5G_Family_500GB). Drives the Plan Mix donut.' },
   { name: 'tenure_months',        required: false, desc: 'Months since signup. Used for cohort retention curves.' },
+  { name: 'segment_code',         required: false, desc: 'Customer segment (postpaid_premium, postpaid_value, prepaid_engaged, prepaid_tourist).' },
+  { name: 'brand',                required: false, desc: 'Brand the plan belongs to (3HK, SoSIM, 3HK_Tourist).' },
+  { name: 'service_type',         required: false, desc: 'Service category (mobile, broadband, roaming, entertainment, insurance).' },
+  { name: 'acquisition_cost',     required: false, desc: 'Per-customer digital CPA from ad_spend / customers_acquired. NULL for organic.' },
 ];
 
 const REQUIRED_CRM = CRM_SCHEMA.filter(c => c.required).map(c => c.name);
@@ -714,23 +722,29 @@ function CRMPreviewTable({ rows }) {
   const [q, setQ] = useState('');
   const [statusF, setStatusF] = useState('all');
   const [planF, setPlanF] = useState('all');
+  const [segmentF, setSegmentF] = useState('all');
+  const [brandF, setBrandF] = useState('all');
   const [sort, setSort] = useState({ field: null, dir: 'asc' });
 
   const statusOptions = useMemo(() => [...new Set(all.map(r => r.status).filter(Boolean))].sort(), [all]);
   const planOptions = useMemo(() => [...new Set(all.map(r => r.plan_type).filter(Boolean))].sort(), [all]);
+  const segmentOptions = useMemo(() => [...new Set(all.map(r => r.segment_code).filter(Boolean))].sort(), [all]);
+  const brandOptions = useMemo(() => [...new Set(all.map(r => r.brand).filter(Boolean))].sort(), [all]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return all.filter(r => {
       if (statusF !== 'all' && r.status !== statusF) return false;
       if (planF !== 'all' && r.plan_type !== planF) return false;
+      if (segmentF !== 'all' && r.segment_code !== segmentF) return false;
+      if (brandF !== 'all' && r.brand !== brandF) return false;
       if (needle) {
         const hay = `${r.customer_id || ''} ${r.campaign_name || ''} ${r.ad_set_name || ''}`.toLowerCase();
         if (!hay.includes(needle)) return false;
       }
       return true;
     });
-  }, [all, q, statusF, planF]);
+  }, [all, q, statusF, planF, segmentF, brandF]);
 
   const sorted = useMemo(() => {
     if (!sort.field) return filtered;
@@ -761,7 +775,7 @@ function CRMPreviewTable({ rows }) {
     return <span style={{ color: '#1e40af', marginLeft: '4px', fontSize: '10px' }}>{sort.dir === 'asc' ? '▲' : '▼'}</span>;
   };
 
-  const hasFilter = q.trim() !== '' || statusF !== 'all' || planF !== 'all';
+  const hasFilter = q.trim() !== '' || statusF !== 'all' || planF !== 'all' || segmentF !== 'all' || brandF !== 'all';
   const ctrlStyle = { background: '#fff', border: '1px solid #e5e7eb', borderRadius: '5px', color: '#374151', padding: '6px 10px', fontSize: '12px', fontFamily: 'inherit' };
 
   return (
@@ -788,9 +802,17 @@ function CRMPreviewTable({ rows }) {
               <option value="all">All plans</option>
               {planOptions.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
+            <select style={ctrlStyle} value={segmentF} onChange={e => setSegmentF(e.target.value)}>
+              <option value="all">All segments</option>
+              {segmentOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select style={ctrlStyle} value={brandF} onChange={e => setBrandF(e.target.value)}>
+              <option value="all">All brands</option>
+              {brandOptions.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
             {hasFilter && (
               <button
-                onClick={() => { setQ(''); setStatusF('all'); setPlanF('all'); }}
+                onClick={() => { setQ(''); setStatusF('all'); setPlanF('all'); setSegmentF('all'); setBrandF('all'); }}
                 style={{ ...ctrlStyle, color: '#6b7280', cursor: 'pointer' }}
               >
                 Clear
@@ -857,7 +879,7 @@ function CRMPreviewTable({ rows }) {
 
 // ── CUSTOMER TAB ──────────────────────────────────────────────────────────────
 
-function CustomerTab({ crmResult, loading, lastFetch, campaignData, onFetch }) {
+function CustomerTab({ crmResult, loading, lastFetch, campaignData, segmentEcon, campaignEff, onFetch }) {
   const leaderboard = useMemo(
     () => (crmResult && !crmResult.error) ? buildLeaderboard(crmResult.rows, campaignData) : [],
     [crmResult, campaignData]
@@ -907,32 +929,64 @@ function CustomerTab({ crmResult, loading, lastFetch, campaignData, onFetch }) {
             </div>
           )}
 
-          <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', overflowX: 'auto', marginBottom: '14px' }}>
-            <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>LTV : CPA Leaderboard</div>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-              <thead>
-                <tr>
-                  {[['Ad Set', false], ['Customers', true], ['Avg ARPU', true], ['Avg Revenue', true], ['CPA', true], ['LTV : CPA', true]].map(([h, r]) => (
-                    <th key={h} style={{ textAlign: r ? 'right' : 'left', padding: '8px 10px', color: '#6b7280', fontWeight: '600', fontSize: '12px', borderBottom: '2px solid #f3f4f6' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {leaderboard.map((r, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
-                    <td style={{ padding: '9px 10px' }}>{r.ad_set_name}</td>
-                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>{r.count}</td>
-                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {r.avgARPU.toFixed(0)}</td>
-                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {r.avgRevenue.toFixed(0)}</td>
-                    <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {r.cpa.toFixed(0)}</td>
-                    <td style={{ textAlign: 'right', padding: '9px 10px', fontWeight: '600', color: r.ltvCpa >= 1 ? '#059669' : '#dc2626' }}>
-                      {r.ltvCpa > 0 ? `${r.ltvCpa.toFixed(1)}x` : '—'}
-                    </td>
+          {segmentEcon.length > 0 && (
+            <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', overflowX: 'auto', marginBottom: '14px' }}>
+              <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Segment Economics (b)</div>
+              <div style={{ fontSize: '11px', color: '#9ca3af', marginBottom: '12px' }}>Blended target CPA from benchmark — covers brand + digital + retail. Used for segment LTV viability.</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr>
+                    {[['Segment', false], ['Customers', true], ['Target CPA', true], ['Avg ARPU', true], ['Avg Projected LTV', true], ['Segment LTV:CPA', true]].map(([h, r]) => (
+                      <th key={h} style={{ textAlign: r ? 'right' : 'left', padding: '8px 10px', color: '#6b7280', fontWeight: '600', fontSize: '12px', borderBottom: '2px solid #f3f4f6' }}>{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {segmentEcon.map((r, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
+                      <td style={{ padding: '9px 10px' }}>{r.display_name}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>{r.customers}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {Number(r.target_cpa_hkd).toFixed(0)}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {Number(r.avg_arpu || 0).toFixed(0)}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {Number(r.avg_projected_ltv || 0).toFixed(0)}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px', fontWeight: '600', color: Number(r.segment_ltv_cpa_ratio) >= 3 ? '#059669' : Number(r.segment_ltv_cpa_ratio) >= 1 ? '#d97706' : '#dc2626' }}>
+                        {r.segment_ltv_cpa_ratio ? `${Number(r.segment_ltv_cpa_ratio).toFixed(1)}x` : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {campaignEff.length > 0 && (
+            <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', overflowX: 'auto', marginBottom: '14px' }}>
+              <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Campaign Efficiency (a)</div>
+              <div style={{ fontSize: '11px', color: '#9ca3af', marginBottom: '12px' }}>Actual digital spend / customers acquired, per (campaign × segment). Compares paid-social campaigns within a segment.</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr>
+                    {[['Campaign', false], ['Platform', false], ['Segment', false], ['Customers', true], ['Spend', true], ['Digital CPA', true], ['Avg LTV', true]].map(([h, r]) => (
+                      <th key={h} style={{ textAlign: r ? 'right' : 'left', padding: '8px 10px', color: '#6b7280', fontWeight: '600', fontSize: '12px', borderBottom: '2px solid #f3f4f6' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {campaignEff.slice().sort((a, b) => (b.customers_acquired || 0) - (a.customers_acquired || 0)).map((r, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
+                      <td style={{ padding: '9px 10px' }}>{r.campaign_name}</td>
+                      <td style={{ padding: '9px 10px' }}>{r.platform}</td>
+                      <td style={{ padding: '9px 10px' }}>{r.segment_code}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>{r.customers_acquired}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {Number(r.total_spend_hkd || 0).toFixed(0)}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>{r.digital_cpa_hkd ? `HKD ${Number(r.digital_cpa_hkd).toFixed(0)}` : '—'}</td>
+                      <td style={{ textAlign: 'right', padding: '9px 10px' }}>HKD {Number(r.avg_projected_ltv || 0).toFixed(0)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {planMix.length > 0 && (
             <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px' }}>
@@ -956,6 +1010,8 @@ function Dashboard() {
   const [crmResult, setCrmResult] = useState(null);
   const [loadingCRM, setLoadingCRM] = useState(false);
   const [lastCrmFetch, setLastCrmFetch] = useState(null);
+  const [segmentEcon, setSegmentEcon] = useState([]);
+  const [campaignEff, setCampaignEff] = useState([]);
   const [tab, setTab] = useState('campaigns');
   const [loading, setLoading] = useState(false);
   const [banners, setBanners] = useState([]);
@@ -1124,6 +1180,13 @@ function Dashboard() {
       if (result.error) { pushBanner('error', result.error); return; }
       setCrmResult({ ...result, name: 'Supabase v_customer_360' });
       setLastCrmFetch(new Date());
+      // Pull segment economics + campaign efficiency in parallel
+      const [segRes, campRes] = await Promise.all([
+        sb.from('v_segment_ltv').select('*'),
+        sb.from('v_campaign_efficiency').select('*'),
+      ]);
+      if (segRes.data) setSegmentEcon(segRes.data);
+      if (campRes.data) setCampaignEff(campRes.data);
       pushBanner(
         'success',
         `Fetched ${renamed.length} customers from Supabase. ${result.joinRate.joined}/${result.joinRate.total} matched ad sets.`,
@@ -1141,6 +1204,8 @@ function Dashboard() {
     setCommittedFiles([]);
     setCrmResult(null);
     setLastCrmFetch(null);
+    setSegmentEcon([]);
+    setCampaignEff([]);
     setTab('campaigns');
     setBanners([]);
   };
@@ -1231,6 +1296,8 @@ function Dashboard() {
           loading={loadingCRM}
           lastFetch={lastCrmFetch}
           campaignData={campaignData}
+          segmentEcon={segmentEcon}
+          campaignEff={campaignEff}
           onFetch={handleFetchSupabase}
         />
       )}
