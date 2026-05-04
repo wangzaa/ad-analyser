@@ -713,170 +713,6 @@ function CampaignTab({ data, crmLoaded, ltvByAdSet, aggregateLTVCPA, onOpenField
   );
 }
 
-// ── CRM PREVIEW TABLE ─────────────────────────────────────────────────────────
-
-function CRMPreviewTable({ rows }) {
-  const all = rows || [];
-  const headers = all.length > 0 ? Object.keys(all[0]).map(h => h.toLowerCase()) : [];
-
-  const [q, setQ] = useState('');
-  const [statusF, setStatusF] = useState('all');
-  const [planF, setPlanF] = useState('all');
-  const [segmentF, setSegmentF] = useState('all');
-  const [brandF, setBrandF] = useState('all');
-  const [sort, setSort] = useState({ field: null, dir: 'asc' });
-
-  const statusOptions = useMemo(() => [...new Set(all.map(r => r.status).filter(Boolean))].sort(), [all]);
-  const planOptions = useMemo(() => [...new Set(all.map(r => r.plan_type).filter(Boolean))].sort(), [all]);
-  const segmentOptions = useMemo(() => [...new Set(all.map(r => r.segment_code).filter(Boolean))].sort(), [all]);
-  const brandOptions = useMemo(() => [...new Set(all.map(r => r.brand).filter(Boolean))].sort(), [all]);
-
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return all.filter(r => {
-      if (statusF !== 'all' && r.status !== statusF) return false;
-      if (planF !== 'all' && r.plan_type !== planF) return false;
-      if (segmentF !== 'all' && r.segment_code !== segmentF) return false;
-      if (brandF !== 'all' && r.brand !== brandF) return false;
-      if (needle) {
-        const hay = `${r.customer_id || ''} ${r.campaign_name || ''} ${r.ad_set_name || ''}`.toLowerCase();
-        if (!hay.includes(needle)) return false;
-      }
-      return true;
-    });
-  }, [all, q, statusF, planF, segmentF, brandF]);
-
-  const sorted = useMemo(() => {
-    if (!sort.field) return filtered;
-    const dir = sort.dir === 'asc' ? 1 : -1;
-    return [...filtered].sort((a, b) => {
-      const av = a[sort.field], bv = b[sort.field];
-      const aMissing = av == null || av === '';
-      const bMissing = bv == null || bv === '';
-      if (aMissing && bMissing) return 0;
-      if (aMissing) return 1;   // missing values sink to bottom regardless of dir
-      if (bMissing) return -1;
-      const an = parseFloat(av), bn = parseFloat(bv);
-      if (!isNaN(an) && !isNaN(bn) && String(av).match(/^-?\d/) && String(bv).match(/^-?\d/)) {
-        return (an - bn) * dir;
-      }
-      return String(av).localeCompare(String(bv)) * dir;
-    });
-  }, [filtered, sort]);
-
-  const handleSort = field => {
-    setSort(s => s.field === field
-      ? { field, dir: s.dir === 'asc' ? 'desc' : 'asc' }
-      : { field, dir: 'asc' });
-  };
-
-  const sortIcon = field => {
-    if (sort.field !== field) return <span style={{ color: '#d1d5db', marginLeft: '4px', fontSize: '9px' }}>↕</span>;
-    return <span style={{ color: '#1e40af', marginLeft: '4px', fontSize: '10px' }}>{sort.dir === 'asc' ? '▲' : '▼'}</span>;
-  };
-
-  const hasFilter = q.trim() !== '' || statusF !== 'all' || planF !== 'all' || segmentF !== 'all' || brandF !== 'all';
-  const ctrlStyle = { background: '#fff', border: '1px solid #e5e7eb', borderRadius: '5px', color: '#374151', padding: '6px 10px', fontSize: '12px', fontFamily: 'inherit' };
-
-  return (
-    <div style={{ background: '#fff', borderRadius: '8px', padding: '16px', marginBottom: '14px', border: '1px solid #f1f5f9' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
-        <div style={{ fontSize: '12px', fontWeight: '600', color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-          CRM Data {all.length > 0
-            ? (hasFilter ? `(${filtered.length.toLocaleString()} of ${all.length.toLocaleString()} rows)` : `(${all.length.toLocaleString()} rows)`)
-            : '(no data)'}
-        </div>
-        {all.length > 0 && (
-          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <input
-              style={{ ...ctrlStyle, minWidth: '220px' }}
-              placeholder="Search customer / campaign / ad set…"
-              value={q}
-              onChange={e => setQ(e.target.value)}
-            />
-            <select style={ctrlStyle} value={statusF} onChange={e => setStatusF(e.target.value)}>
-              <option value="all">All statuses</option>
-              {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <select style={ctrlStyle} value={planF} onChange={e => setPlanF(e.target.value)}>
-              <option value="all">All plans</option>
-              {planOptions.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <select style={ctrlStyle} value={segmentF} onChange={e => setSegmentF(e.target.value)}>
-              <option value="all">All segments</option>
-              {segmentOptions.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <select style={ctrlStyle} value={brandF} onChange={e => setBrandF(e.target.value)}>
-              <option value="all">All brands</option>
-              {brandOptions.map(b => <option key={b} value={b}>{b}</option>)}
-            </select>
-            {hasFilter && (
-              <button
-                onClick={() => { setQ(''); setStatusF('all'); setPlanF('all'); setSegmentF('all'); setBrandF('all'); }}
-                style={{ ...ctrlStyle, color: '#6b7280', cursor: 'pointer' }}
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-      <div style={{ overflow: 'auto', maxHeight: '60vh', border: '1px solid #f3f4f6', borderRadius: '4px' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-          <thead style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1, boxShadow: 'inset 0 -2px 0 #f3f4f6' }}>
-            <tr>
-              {CRM_SCHEMA.map(col => (
-                <th key={col.name} style={{ textAlign: 'left', padding: '8px 10px', whiteSpace: 'nowrap', background: '#fff', cursor: 'pointer', userSelect: 'none' }}
-                    onClick={() => handleSort(col.name)}
-                    title={`Sort by ${col.name}`}>
-                  <div style={{ display: 'flex', alignItems: 'center', color: '#374151', fontWeight: '600', fontSize: '11px' }}>
-                    <span>{col.name}</span>
-                    {sortIcon(col.name)}
-                    <InfoTip text={col.desc} />
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {all.length === 0 ? (
-              <tr>
-                <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
-                  Click "Fetch from Supabase" above to load customer data.
-                </td>
-              </tr>
-            ) : sorted.length === 0 ? (
-              <tr>
-                <td colSpan={CRM_SCHEMA.length} style={{ padding: '18px 10px', textAlign: 'center', color: '#9ca3af', fontStyle: 'italic' }}>
-                  No rows match the current filters.
-                </td>
-              </tr>
-            ) : (
-              sorted.map((row, i) => {
-                const lcRow = {};
-                Object.keys(row).forEach(k => { lcRow[k.toLowerCase()] = row[k]; });
-                return (
-                  <tr key={i} style={{ borderBottom: '1px solid #f9fafb' }}>
-                    {CRM_SCHEMA.map(col => {
-                      const val = lcRow[col.name];
-                      const present = headers.includes(col.name);
-                      return (
-                        <td key={col.name} style={{ padding: '7px 10px', whiteSpace: 'nowrap', color: present ? '#111827' : '#d1d5db' }}>
-                          {present ? (val !== undefined && val !== '' && val !== null ? val : <span style={{ color: '#d1d5db' }}>—</span>) : <span style={{ color: '#d1d5db' }}>not provided</span>}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
 // ── CUSTOMER TAB ──────────────────────────────────────────────────────────────
 
 function CustomerTab({ crmResult, loading, lastFetch, campaignData, segmentEcon, campaignEff, onFetch }) {
@@ -888,8 +724,6 @@ function CustomerTab({ crmResult, loading, lastFetch, campaignData, segmentEcon,
     () => (crmResult && !crmResult.error) ? buildPlanMix(crmResult.rows) : [],
     [crmResult]
   );
-
-  const previewRows = crmResult && !crmResult.error ? crmResult.rows : null;
 
   return (
     <div>
@@ -994,8 +828,6 @@ function CustomerTab({ crmResult, loading, lastFetch, campaignData, segmentEcon,
               <Donut data={planMix} />
             </div>
           )}
-
-          <CRMPreviewTable rows={previewRows} />
         </>
       )}
     </div>
